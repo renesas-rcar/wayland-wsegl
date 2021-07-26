@@ -1,0 +1,19 @@
+RGX WSEGL for Wayland
+
+1. Prerequisite
+
+   You'll need the following pacakges:
+
+	- wayland-server (https://gitlab.freedesktop.org/wayland/wayland)
+	- wayland-client (https://gitlab.freedesktop.org/wayland/wayland)
+	- libdrm (https://dri.freedesktop.org/libdrm/)
+	- libkms (https://dri.freedesktop.org/libdrm/)
+	- libgbm (https://github.com/renesas-rcar/libgbm)
+	- wayland-kms (https://github.com/renesas-rcar/wayland-kms)
+
+   Please make sure that the pacakges above could be found with pkg-config.
+
+2. How to build
+
+   Build with Yocto recipe & bitbake. Please refer to Renesas Yocto Startup Guide for detail.
+   The procedure installs WSEGL for RGX under /usr/lib/libpvrWAYLAND_WSEGL.so
