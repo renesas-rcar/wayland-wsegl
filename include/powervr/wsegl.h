@@ -2,6 +2,7 @@
 @File
 @Title          WSEGL interface definition
 @Copyright      Copyright (c) Imagination Technologies Ltd. All Rights Reserved
+		Copyright (c) 2021 Renesas Electronics Corporation. All rights reserved.
 @License        MIT
 
 The contents of this file are subject to the MIT license as set out below.
@@ -40,7 +41,9 @@ THE SOFTWARE.
 #include <powervr/imgpixfmts.h>
 #include <powervr/pvrsrv_sync_ext.h>
 
-//#include "yuvinfo.h"
+#ifndef REL_STANDALONE_BUILD
+#include "yuvinfo.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -121,16 +124,7 @@ typedef enum
 
 } WSEGLCapsType;
 
-/*
-// Display capability
-*/
-typedef struct
-{
-	WSEGLCapsType eCapsType;
-	uint32_t      ui32CapsValue;
-
-} WSEGLCaps;
-
+#ifdef REL_STANDALONE_BUILD
 typedef struct YUV_INFO_TAG
 {
 	bool	bValid;
@@ -141,6 +135,17 @@ typedef struct YUV_INFO_TAG
 	/* Size of header section */
 	uint32_t	ui32PlaneHeaderSizeInBytes[3];
 } YUV_INFO;
+#endif
+
+/*
+// Display capability
+*/
+typedef struct
+{
+	WSEGLCapsType eCapsType;
+	uint32_t      ui32CapsValue;
+
+} WSEGLCaps;
 
 /*
 // Drawable type
@@ -235,7 +240,6 @@ typedef enum
 	WSEGL_OUT_OF_MEMORY = 8,
 	WSEGL_RETRY = 9,
 	WSEGL_BAD_ACCESS = 10,
-	WSEGL_UNTRUSTED_APP = 11,
 
 } WSEGLError;
 
@@ -306,9 +310,6 @@ typedef struct
 
 	/* Flags */
 	uint32_t                 ui32Flags;
-
-	uint32_t                 ui32NumLevels;
-
 } WSEGLBaseParams;
 
 
@@ -398,11 +399,6 @@ typedef struct
 	WSEGLError (*pfnWSEGL_SetSingleBuffered)(WSEGLDrawableHandle, int);
 
 	WSEGLError (*pfnWSEGL_FlagIntentToQuery)(WSEGLDrawableHandle);
-
-#if defined(EGL_EXTENSION_NV_CONTEXT_PRIORITY_REALTIME)
-	WSEGLError (*pfnWSEGL_IsTrustedAppForRealtimePriority)(WSEGLDisplayHandle *);
-#endif /* defined(EGL_EXTENSION_NV_CONTEXT_PRIORITY_REALTIME) */
-
 } WSEGL_FunctionTable;
 
 

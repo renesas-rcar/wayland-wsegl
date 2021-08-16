@@ -28,7 +28,7 @@ AC_CONFIG_SRCDIR([Makefile.am])
 AC_CONFIG_HEADERS([config.h])
 
 # Initialize Automake
-AM_INIT_AUTOMAKE([foreign dist-bzip2])
+AM_INIT_AUTOMAKE([foreign dist-bzip2 subdir-objects])
 #AM_MAINTAINER_MODE
 
 # Initialize libtool
@@ -82,6 +82,16 @@ AC_ARG_ENABLE(native_fence_sync,
 		*) AC_MSG_ERROR([bad value ${enableval} for --enable-native-fence-sync]) ;;
 	       esac], [native_fence_sync=true])
 AM_CONDITIONAL([NATIVE_FENCE_SYNC], [test x$native_fence_sync = xtrue])
+
+AC_ARG_ENABLE(standalone_build,
+	      [AS_HELP_STRING([--enable-standalone-build],
+			      [enable standalone build, default: yes])],
+	      [case "${enableval}" in
+	        yes) standalone_build=true ;;
+		no)  standalone_build=false ;;
+		*) AC_MSG_ERROR([bad value ${enableval} for --enable-standalone-build]) ;;
+	       esac], [standalone_build=true])
+AM_CONDITIONAL([STANDALONE_BUILD], [test x$standalone_build = xtrue])
 
 # Default WSEGL drivers
 WSEGL_DEFAULT="r8a7795"

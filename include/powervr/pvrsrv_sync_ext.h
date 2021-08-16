@@ -42,7 +42,7 @@ extern "C" {
 /*!
  * Maximum number of dev var updates passed in a kick call
  */
-#define PVRSRV_MAX_DEV_VARS 13
+#define PVRSRV_MAX_DEV_VARS 8
 
 /*!
  * Number of UFOs in operations

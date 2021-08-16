@@ -54,14 +54,16 @@ THE SOFTWARE.
 #define DRM_FORMAT_BGRA8888_DIRECT_16x4 fourcc_code('I', 'M', 'G', '0')
 #endif
 
-#if !defined(__KERNEL__)
 /*
- * A definition for the same format was added in Linux kernel 5.2 in commit
- * 88ab9c76d191ad8645b483f31e2b394b0f3e280e. As such, this definition has been
- * deprecated and the DRM_FORMAT_ABGR16161616F kernel define should be used
- * instead of this one.
+ * Upstream doesn't have a floating point format yet, so let's make one
+ * up.
+ * Note: The kernel's core DRM needs to know about this format,
+ * otherwise it won't be supported and should not be exposed by our
+ * kernel modules either.
+ * Refer to the provided kernel patch adding this format.
  */
-#define DRM_FORMAT_ABGR16_IMG_DEPRECATED fourcc_code('I', 'M', 'G', '1')
+#if !defined(__KERNEL__)
+#define DRM_FORMAT_ABGR16_IMG fourcc_code('I', 'M', 'G', '1')
 #endif
 
 /*
@@ -92,15 +94,6 @@ THE SOFTWARE.
 #define DRM_FORMAT_RESERVED ((1ULL << 56) - 1)
 #endif
 
-#define img_fourcc_mod_combine(uiModHi, uiModLo) \
-	((__u64) ((__u32) (uiModHi)) << 32 | (__u64) ((__u32) (uiModLo)))
-
-#define img_fourcc_mod_hi(ui64Mod) \
-	((__u32) ((__u64) (ui64Mod) >> 32))
-
-#define img_fourcc_mod_lo(ui64Mod) \
-	((__u32) ((__u64) (ui64Mod)) & 0xffffffff)
-
 #ifndef fourcc_mod_code
 #define fourcc_mod_code(vendor, val) \
 	((((__u64)DRM_FORMAT_MOD_VENDOR_## vendor) << 56) | (val & 0x00ffffffffffffffULL))
@@ -116,12 +109,5 @@ THE SOFTWARE.
 
 #define DRM_FORMAT_MOD_PVR_FBCDC_8x8_V7      fourcc_mod_code(PVR, 6)
 #define DRM_FORMAT_MOD_PVR_FBCDC_16x4_V7     fourcc_mod_code(PVR, 12)
-
-#define DRM_FORMAT_MOD_PVR_FBCDC_8x8_V10     fourcc_mod_code(PVR, 21)
-#define DRM_FORMAT_MOD_PVR_FBCDC_16x4_V10    fourcc_mod_code(PVR, 22)
-#define DRM_FORMAT_MOD_PVR_FBCDC_32x2_V10    fourcc_mod_code(PVR, 23)
-
-#define DRM_FORMAT_MOD_PVR_FBCDC_8x8_V12     fourcc_mod_code(PVR, 15)
-#define DRM_FORMAT_MOD_PVR_FBCDC_16x4_V12    fourcc_mod_code(PVR, 16)
 
 #endif /* IMG_DRM_FOURCC_H */
