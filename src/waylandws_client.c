@@ -504,7 +504,7 @@ wayland_get_wl_buffer_from_zlinux_dmabuf(WLWSClientDisplay *display,
 {
 	uint32_t pixelformat;
 	struct zwp_linux_buffer_params_v1 *params;
-	struct dmabuf_params_result params_result;
+	struct dmabuf_params_result params_result = {NULL, 0};
 	int ret = 0;
 
 	/* check the pixelformat */
@@ -535,7 +535,6 @@ wayland_get_wl_buffer_from_zlinux_dmabuf(WLWSClientDisplay *display,
 		pixelformat, 0);
 	wl_display_flush(display->wl_display);
 
-	params_result.done = 0;
 	while (ret >= 0 && !params_result.done) {
 		ret = wl_display_dispatch_queue(display->wl_display,
 						display->wl_queue);
