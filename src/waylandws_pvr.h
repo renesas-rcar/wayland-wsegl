@@ -43,7 +43,7 @@ struct pvr_context {
 
         pvr_status              status;
         int                     count;
-}pvr_context;
+};
 
 struct pvr_map;
 
