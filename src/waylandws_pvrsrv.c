@@ -83,7 +83,7 @@ void __attribute__((visibility("internal"))) pvr_disconnect(struct pvr_context *
 			PVRSRVDestroyDeviceMemContextExt(context->rgx_devmem_context ,context->devmem_context);
 			PVRSRVDisconnectExt(context->connection);
 			context->connection = NULL;
-			context->status = PVR_STATUS_NOTREADY;;
+			context->status = PVR_STATUS_NOTREADY;
 		}
 	}
 }
@@ -108,10 +108,6 @@ static struct pvr_map *pvr_map_to_device(struct pvr_context *context,
 	return map;
 
 error:
-	if (map->memdesc) {
-		PVRSRVReleaseDeviceMappingExt(map->memdesc);
-	}
-
 	free(map);
 
 	return NULL;
