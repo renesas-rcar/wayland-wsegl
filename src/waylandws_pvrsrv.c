@@ -80,7 +80,7 @@ void __attribute__((visibility("internal"))) pvr_disconnect(struct pvr_context *
 
 		if (context->count == 0) {
 			PVRSRVReleaseGlobalEventHandleExt(context->connection, context->event);
-			PVRSRVDestroyDeviceMemContextExt(context->rgx_devmem_context ,context->devmem_context);
+			PVRSRVReleaseDeviceMemContextExt(context->rgx_devmem_context ,context->devmem_context);
 			PVRSRVDisconnectExt(context->connection);
 			context->connection = NULL;
 			context->status = PVR_STATUS_NOTREADY;

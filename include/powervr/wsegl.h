@@ -240,6 +240,7 @@ typedef enum
 	WSEGL_OUT_OF_MEMORY = 8,
 	WSEGL_RETRY = 9,
 	WSEGL_BAD_ACCESS = 10,
+	WSEGL_UNTRUSTED_APP = 11,
 
 } WSEGLError;
 
@@ -310,6 +311,9 @@ typedef struct
 
 	/* Flags */
 	uint32_t                 ui32Flags;
+
+	uint32_t                 ui32NumLevels;
+
 } WSEGLBaseParams;
 
 
@@ -399,6 +403,11 @@ typedef struct
 	WSEGLError (*pfnWSEGL_SetSingleBuffered)(WSEGLDrawableHandle, int);
 
 	WSEGLError (*pfnWSEGL_FlagIntentToQuery)(WSEGLDrawableHandle);
+
+#if defined(EGL_EXTENSION_NV_CONTEXT_PRIORITY_REALTIME)
+	WSEGLError (*pfnWSEGL_IsTrustedAppForRealtimePriority)(WSEGLDisplayHandle *);
+#endif /* defined(EGL_EXTENSION_NV_CONTEXT_PRIORITY_REALTIME) */
+
 } WSEGL_FunctionTable;
 
 

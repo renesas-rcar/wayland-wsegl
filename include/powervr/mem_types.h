@@ -34,7 +34,7 @@ extern "C" {
 
 #if defined(_MSC_VER)
 	#include "msvc_types.h"
-#elif defined(LINUX) && defined(__KERNEL__)
+#elif defined(__linux__) && defined(__KERNEL__)
 	#include <linux/types.h>
 	#include <linux/compiler.h>
 #else
