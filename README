@@ -13,7 +13,18 @@ RGX WSEGL for Wayland
 
    Please make sure that the pacakges above could be found with pkg-config.
 
+   You'll also need libpvr2d and libsrv_um from RGX SDK.
+
 2. How to build
 
    Build with Yocto recipe & bitbake. Please refer to Renesas Yocto Startup Guide for detail.
    The procedure installs WSEGL for RGX under /usr/lib/libpvrWAYLAND_WSEGL.so
+
+   Or if you are using the Yocto-generated SDK to cross-compile, you may follow:
+
+	$ autoreconf -vif
+	$ ./configure --prefix=${OUTPUT_DIR} ${CONFIGURE_FLAGS}
+	$ make
+	$ make install
+
+   This procedure installs WSEGL for RGX under ${OUTPUT_DIR}/lib.
