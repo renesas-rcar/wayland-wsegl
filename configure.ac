@@ -73,6 +73,16 @@ AC_ARG_ENABLE(debug,
 	       esac], [debug=false])
 AM_CONDITIONAL([DEBUG], [test x$debug = xtrue])
 
+AC_ARG_ENABLE(gcov,
+	      [AS_HELP_STRING([--enable-gcov],
+			      [Enable optional gcov coverage analysis, default: no])],
+	      [case "${enableval}" in
+	        yes) gcov=true ;;
+		no)  gcov=false ;;
+		*) AC_MSG_ERROR([bad value ${enableval} for --enable-gcov]) ;;
+	       esac], [gcov=false])
+AM_CONDITIONAL([HAVE_GCOV], [test x$gcov = xtrue])
+
 AC_ARG_ENABLE(native_fence_sync,
 	      [AS_HELP_STRING([--enable-native-fence-sync],
 			      [enable native fence sync, default: yes])],

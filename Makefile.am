@@ -7,6 +7,10 @@ else
 AM_CFLAGS += -O3
 endif
 
+if HAVE_GCOV
+AM_CFLAGS += -fprofile-arcs -ftest-coverage
+endif
+
 if NATIVE_FENCE_SYNC
 AM_CFLAGS += -DSUPPORT_NATIVE_FENCE_SYNC
 endif
