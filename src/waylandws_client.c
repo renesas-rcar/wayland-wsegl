@@ -698,6 +698,20 @@ static bool setup_buffer_sharing(WLWSClientDisplay *display)
 	return authenticate_kms_device(display);
 }
 
+static bool ensure_supported_dmabuf_formats(WLWSClientDisplay *display)
+{
+	if (!display->zlinux_dmabuf)
+		return true;
+
+	if (wl_display_roundtrip_queue(display->wl_display, display->wl_queue) < 0 ||
+            !display->enable_formats) {
+		/* No supported dmabuf pixel formats */
+		return false;
+	}
+
+	return true;
+}
+
 /***********************************************************************************
  Function Name      : WSEGL_InitialiseDisplay
  Inputs             : hNativeDisplay
@@ -751,6 +765,12 @@ static WSEGLError WSEGLc_InitialiseDisplay(NativeDisplayType hNativeDisplay,
 
 	/* Now setup the DRM device */
 	if (!setup_buffer_sharing(display)) {
+		err = WSEGL_BAD_NATIVE_DISPLAY;
+		goto fail;
+	}
+
+	/* Get the list of supported pixel formats */
+	if (!ensure_supported_dmabuf_formats(display)) {
 		err = WSEGL_BAD_NATIVE_DISPLAY;
 		goto fail;
 	}
