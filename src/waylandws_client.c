@@ -681,7 +681,7 @@ static bool authenticate_kms_device(WLWSClientDisplay *display)
 	return true;
 }
 
-static bool setup_buffer_sharing(WLWSClientDisplay *display)
+static bool setup_drm_device(WLWSClientDisplay *display)
 {
 	display->fd = -1;
 
@@ -764,7 +764,7 @@ static WSEGLError WSEGLc_InitialiseDisplay(NativeDisplayType hNativeDisplay,
 	wl_registry_add_listener(display->wl_registry, &wayland_registry_listener, display);
 
 	/* Now setup the DRM device */
-	if (!setup_buffer_sharing(display)) {
+	if (!setup_drm_device(display)) {
 		err = WSEGL_BAD_NATIVE_DISPLAY;
 		goto fail;
 	}
