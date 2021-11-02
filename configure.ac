@@ -22,7 +22,7 @@
 
 # Initialize Autoconf
 AC_PREREQ([2.60])
-AC_INIT([wayland-wsegl], [3.1.0],
+AC_INIT([wayland-wsegl], [3.1.1],
         [http://www.renesas.com/], [wayland-wsegl])
 AC_CONFIG_SRCDIR([Makefile.am])
 AC_CONFIG_HEADERS([config.h])
