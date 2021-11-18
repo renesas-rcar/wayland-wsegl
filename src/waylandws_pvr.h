@@ -85,7 +85,7 @@ extern void pvr_sync(struct pvr_context *ctx, struct pvr_map *map);
 /**
  * Fill in details required for image params
  */
-extern void pvr_get_image_params(struct pvr_map *map, WLWSDrawableInfo *info, WSEGLImageParams *params);
+extern int pvr_get_image_params(struct pvr_map *map, WLWSDrawableInfo *info, WSEGLImageParams *params);
 
 /**
  * Request the CPU virtual address

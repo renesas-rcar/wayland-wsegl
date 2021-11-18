@@ -776,7 +776,10 @@ static WSEGLError WSEGLs_GetImageParameters(WSEGLDrawableHandle hDrawable,
 	WSEGL_UNREFERENCED_PARAMETER(ulPlaneOffset);
 
 	memset(psImageParams, 0, sizeof(*psImageParams));
-	pvr_get_image_params(drawable->current->map, &drawable->info, psImageParams);
+	if (!pvr_get_image_params(drawable->current->map, &drawable->info, psImageParams)) {
+		return WSEGL_BAD_NATIVE_PIXMAP;
+	}
+
 	return WSEGL_SUCCESS;
 }
 

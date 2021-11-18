@@ -168,6 +168,78 @@ void __attribute__((visibility("internal"))) pvr_unmap_memory(struct pvr_context
 	free(map);
 }
 
+static bool is_format_yuv(IMG_PIXFMT format)
+{
+	switch (format)
+	{
+		case WLWSEGL_PIXFMT_UYVY:
+		case WLWSEGL_PIXFMT_YUYV:
+		case WLWSEGL_PIXFMT_VYUY:
+		case WLWSEGL_PIXFMT_YVYU:
+		case WLWSEGL_PIXFMT_NV12:
+		case WLWSEGL_PIXFMT_NV21:
+		case WLWSEGL_PIXFMT_I420:
+		case WLWSEGL_PIXFMT_YV12:
+		case WLWSEGL_PIXFMT_NV16:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static bool get_plane_stride(IMG_PIXFMT format, uint32_t stride, uint32_t *plane_stride)
+{
+	uint32_t plane_bytes;
+
+	switch (format) {
+		case WLWSEGL_PIXFMT_UYVY:
+		case WLWSEGL_PIXFMT_YUYV:
+		case WLWSEGL_PIXFMT_VYUY:
+		case WLWSEGL_PIXFMT_YVYU:
+		case WLWSEGL_PIXFMT_NV16:
+			plane_bytes = 2;
+			break;
+		case WLWSEGL_PIXFMT_NV12:
+		case WLWSEGL_PIXFMT_NV21:
+		case WLWSEGL_PIXFMT_I420:
+		case WLWSEGL_PIXFMT_YV12:
+			plane_bytes = 1;
+			break;
+		default:
+			/* unsupported YUV format */
+			return false;
+	}
+
+	/* The stride of YUV must be aligned */
+	if (stride % plane_bytes)
+		return false;
+
+	*plane_stride = stride / plane_bytes;
+
+	return true;
+}
+
+static bool get_plane_size(IMG_PIXFMT format, uint32_t *plane_size, uint32_t stride, int32_t height)
+{
+	switch (format) {
+		case WLWSEGL_PIXFMT_NV12:
+		case WLWSEGL_PIXFMT_NV21:
+			*(plane_size + 0) = stride * height;
+			break;
+		case WLWSEGL_PIXFMT_NV16:
+			*(plane_size + 0) = (stride >> 1) * height;
+			break;
+		case WLWSEGL_PIXFMT_I420:
+		case WLWSEGL_PIXFMT_YV12:
+			*(plane_size + 0) = stride * height;
+			*(plane_size + 1) = (stride >> 1) * (height >> 1);
+			break;
+		default:
+			return false;
+	}
+	return true;
+}
+
 void __attribute__((visibility("internal"))) pvr_get_params(struct pvr_map *map, WLWSDrawableInfo *info, WSEGLDrawableParams *params)
 {
 	params->sBase.iWidth            = info->width;
@@ -186,8 +258,10 @@ void __attribute__((visibility("internal"))) pvr_get_params(struct pvr_map *map,
 	params->sBase.hFence            = PVRSRV_NO_FENCE;
 }
 
-void __attribute__((visibility("internal"))) pvr_get_image_params(struct pvr_map *map, WLWSDrawableInfo *info, WSEGLImageParams *params)
+int __attribute__((visibility("internal"))) pvr_get_image_params(struct pvr_map *map, WLWSDrawableInfo *info, WSEGLImageParams *params)
 {
+	uint32_t plane_size[2] = {0, 0};
+
 	params->sBase.iWidth            = info->width;
 	params->sBase.iHeight           = info->height;
 	params->sBase.ePixelFormat      = info->pixelformat;
@@ -207,6 +281,19 @@ void __attribute__((visibility("internal"))) pvr_get_image_params(struct pvr_map
 	params->eChromaUInterp = info->eChromaUInterp;
 	params->eChromaVInterp = info->eChromaVInterp;
 	/* end */
+
+	if (is_format_yuv(params->sBase.ePixelFormat)) {
+		if (get_plane_size(params->sBase.ePixelFormat, plane_size, params->sBase.ui32StrideInBytes, params->sBase.iHeight)) {
+			params->sBase.asHWAddress[1].uiAddr = params->sBase.asHWAddress[0].uiAddr + plane_size[0];
+			params->sBase.asHWAddress[2].uiAddr = params->sBase.asHWAddress[1].uiAddr + plane_size[1];
+		}
+
+		return get_plane_stride(params->sBase.ePixelFormat,
+					params->sBase.ui32StrideInBytes,
+					&params->sYUVInfo.ui32Plane0StrideInTexels);
+	}
+
+	return 1;
 }
 
 int __attribute__((visibility("internal"))) pvr_acquire_cpu_mapping(PVRSRV_MEMDESC hMemDesc, void **ppvCpuVirtAddr)
