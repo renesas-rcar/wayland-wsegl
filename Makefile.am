@@ -83,6 +83,8 @@ libpvrWAYLAND_WSEGL_la_LIBADD = \
 	$(WSEGL_CORE_LIBADD) \
 	-lsrv_um
 
+libpvrWAYLAND_WSEGL_la_LDFLAGS = -version-number $(PVRWAYLAND_WSEGL_SO_VERSION)
+
 noinst_HEADERS = \
 	src/waylandws.h \
 	src/waylandws_client.h \
