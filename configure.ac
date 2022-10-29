@@ -34,6 +34,9 @@ AM_INIT_AUTOMAKE([foreign dist-bzip2 subdir-objects])
 # Initialize libtool
 AC_PROG_LIBTOOL
 
+# Add libtool library version information
+AC_SUBST([PVRWAYLAND_WSEGL_SO_VERSION], [3:1:1])
+
 # Check headers
 AC_CHECK_HEADERS([wayland-egl-backend.h])
 
