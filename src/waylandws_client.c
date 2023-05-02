@@ -1060,7 +1060,10 @@ static WSEGLError WSEGLc_CreateWindowDrawable(WSEGLDisplayHandle hDisplay,
 	/* set swap interval, either default value or whatever previously set before resizing */
 	if (GET_EGL_WINDOW_PRIVATE(drawable->window)) {
 		WLWSClientDrawable *previous_drawable = GET_EGL_WINDOW_PRIVATE(drawable->window);
-		drawable->surface = previous_drawable->surface;
+		drawable->surface = calloc(sizeof(WLWSClientSurface), 1);
+		drawable->surface->interval =
+			((previous_drawable->surface) ? (previous_drawable->surface->interval) : 1);
+		drawable->surface->frame_sync = NULL;
 		previous_drawable->window = NULL;
 	} else {
 		drawable->surface = calloc(sizeof(WLWSClientSurface), 1);
@@ -1523,24 +1526,7 @@ static WSEGLError WSEGLc_DeleteDrawable(WSEGLDrawableHandle hDrawable)
 		return WSEGL_BAD_NATIVE_PIXMAP;
 
 	drawable->ref_count--;
-	if (drawable->ref_count > 0)
-		return WSEGL_SUCCESS;
-
-	/* reset resize callback */
-	if (drawable->window) {
-		drawable->window->resize_callback = NULL;
-		SET_EGL_WINDOW_PRIVATE(drawable->window, NULL);
-		if (drawable->surface->frame_sync)
-			wl_callback_destroy(drawable->surface->frame_sync);
-		free(drawable->surface);
-        if (drawable->callback) {
-            wl_callback_destroy(drawable->callback);
-            drawable->callback = NULL;
-                }
-
-	}
-
-	if (drawable->pixmap_kms_buffer_in_use)
+	if (drawable->ref_count > 0 || drawable->pixmap_kms_buffer_in_use)
 		return WSEGL_SUCCESS;
 
 	switch (drawable->buffer_type) {
@@ -1555,6 +1541,30 @@ static WSEGLError WSEGLc_DeleteDrawable(WSEGLDrawableHandle hDrawable)
 		break;
 	default:
 		WSEGL_DEBUG("unknown buffer type: %d\n", drawable->buffer_type);
+	}
+
+	/* reset resize callback */
+	if (drawable->window) {
+		drawable->window->resize_callback = NULL;
+		SET_EGL_WINDOW_PRIVATE(drawable->window, NULL);
+	}
+
+	if(drawable->surface) {
+		if (drawable->surface->frame_sync) {
+			struct wayland_cb_data *cb_data =
+			    wl_callback_get_user_data(drawable->surface->frame_sync);
+			wl_callback_destroy(drawable->surface->frame_sync);
+			free(cb_data);
+		}
+		free(drawable->surface);
+	}
+
+	if (drawable->callback) {
+		struct wayland_cb_data *cb_data =
+			wl_callback_get_user_data(drawable->callback);
+		wl_callback_destroy(drawable->callback);
+		free(cb_data);
+		drawable->callback = NULL;
 	}
 
 	if (drawable->kms)
