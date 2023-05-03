@@ -67,13 +67,6 @@
 const char *ENV_NUM_BUFFERS = "WSEGL_NUM_BUFFERS";
 const char *PVRCONF_NUM_BUFFERS = "WseglNumBuffers";
 
-/*
- * Set to non-zero to eanble an aggressive sync mode. This must be enabled
- * when a fullscreen mode is used with gl-renderer with double buffering mode.
- */
-const char *ENV_ENABLE_AGGRESSIVE_SYNC = "WSEGL_ENABLE_AGGRESSIVE_SYNC";
-const char *PVRCONF_ENABLE_AGGRESSIVE_SYNC = "WseglEnableAggressiveSync";
-
 /* enable formats */
 enum {
 	ENABLE_FORMAT_ARGB8888 = 1 << 0,
@@ -106,9 +99,6 @@ typedef struct WaylandWS_Client_Display_TAG
         /* PVR context */
         struct pvr_context      *context;
         pthread_mutex_t         pvr_ctx_mutex;
-
-        /* mode setting */
-        int                     aggressive_sync;
 } WLWSClientDisplay;
 
 /* Do not change the following number. */
@@ -190,9 +180,6 @@ typedef struct WaylandWS_Client_Drawable_TAG
 	uint32_t                modifier_lo;
 	uint32_t                modifier_hi;
 
-	/* for sync/frame events */
-	struct wl_callback      *callback;
-
 	struct wl_egl_window    *window;
 	bool			enable_damage_buffer;
 
@@ -251,7 +238,7 @@ static void wayland_set_callback(WLWSClientDrawable *drawable,
 	struct wl_event_queue *queue = drawable->wl_queue;
 
 	if (!flag)
-		flag = &drawable->callback;
+		flag = &drawable->surface->sync_obj;
 #if defined(DEBUG)
        WSEGL_DEBUG("%s: %s: callback=%s(%p)\n", __FILE__, __func__, name, callback);
 #else
@@ -623,24 +610,12 @@ static void wayland_wait_for_buffer_release(WLWSClientDrawable *drawable)
 	if (!drawable->current)
 		drawable->current = get_free_buffer(drawable);
 	while (!drawable->current || IS_KMS_BUFFER_LOCKED(drawable->current)) {
-		WSEGL_DEBUG("%s: %s: current=%p, callback=%p\n", __FILE__, __func__,
-			    drawable->current, drawable->callback);
-
-		if (display->aggressive_sync)
-			wayland_set_callback(drawable, wl_display_sync(display->wl_display),
-					     NULL, "wl_display_sync(2)");
+		WSEGL_DEBUG("%s: %s: current=%p\n", __FILE__, __func__,
+			    drawable->current);
 
 		if (wl_display_dispatch_queue(display->wl_display, drawable->wl_queue) < 0)
 			break;
 		drawable->current = get_free_buffer(drawable);
-	}
-
-	if (drawable->callback) {
-		struct wayland_cb_data *cb_data = wl_callback_get_user_data(drawable->callback);
-		WSEGL_DEBUG("%s: %s: destroying callback. something went wrong.\n", __FILE__, __func__);
-		wl_callback_destroy(drawable->callback);
-		free(cb_data);
-		drawable->callback = NULL;
 	}
 
 	WSEGL_DEBUG("%s: %s: buffer unlocked\n", __FILE__, __func__);
@@ -773,9 +748,6 @@ static WSEGLError WSEGLc_InitialiseDisplay(NativeDisplayType hNativeDisplay,
 
 	/* Initialize PVR context access mutex */
 	pthread_mutex_init(&display->pvr_ctx_mutex, NULL);
-
-	/* set sync mode */
-	display->aggressive_sync = get_config_value(PVRCONF_ENABLE_AGGRESSIVE_SYNC, ENV_ENABLE_AGGRESSIVE_SYNC, 0);
 
 	/* return the pointers to the caps, configs, and the display handle */
 	*psCapabilities = WLWSEGL_Caps;
@@ -1557,14 +1529,6 @@ static WSEGLError WSEGLc_DeleteDrawable(WSEGLDrawableHandle hDrawable)
 			free(cb_data);
 		}
 		free(drawable->surface);
-	}
-
-	if (drawable->callback) {
-		struct wayland_cb_data *cb_data =
-			wl_callback_get_user_data(drawable->callback);
-		wl_callback_destroy(drawable->callback);
-		free(cb_data);
-		drawable->callback = NULL;
 	}
 
 	if (drawable->kms)
