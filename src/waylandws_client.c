@@ -160,7 +160,7 @@ typedef enum {
 
 typedef struct {
         int                     interval;
-        struct wl_callback      *frame_sync;
+        struct wl_callback      *sync_obj;
 } WLWSClientSurface;
 
 struct queue {
@@ -1063,7 +1063,7 @@ static WSEGLError WSEGLc_CreateWindowDrawable(WSEGLDisplayHandle hDisplay,
 		drawable->surface = calloc(sizeof(WLWSClientSurface), 1);
 		drawable->surface->interval =
 			((previous_drawable->surface) ? (previous_drawable->surface->interval) : 1);
-		drawable->surface->frame_sync = NULL;
+		drawable->surface->sync_obj = NULL;
 		previous_drawable->window = NULL;
 	} else {
 		drawable->surface = calloc(sizeof(WLWSClientSurface), 1);
@@ -1550,10 +1550,10 @@ static WSEGLError WSEGLc_DeleteDrawable(WSEGLDrawableHandle hDrawable)
 	}
 
 	if(drawable->surface) {
-		if (drawable->surface->frame_sync) {
+		if (drawable->surface->sync_obj) {
 			struct wayland_cb_data *cb_data =
-			    wl_callback_get_user_data(drawable->surface->frame_sync);
-			wl_callback_destroy(drawable->surface->frame_sync);
+			    wl_callback_get_user_data(drawable->surface->sync_obj);
+			wl_callback_destroy(drawable->surface->sync_obj);
 			free(cb_data);
 		}
 		free(drawable->surface);
@@ -1610,14 +1610,14 @@ static int wayland_commit_buffer(WLWSClientDrawable *drawable,
 	int interval = drawable->surface->interval;
 
 	/* Sync with the server. */
-	if (drawable->surface->frame_sync) {
+	if (drawable->surface->sync_obj) {
 		WSEGL_DEBUG("%s: %s: sync frame.\n", __FILE__, __func__);
 
 		wl_display_dispatch_queue_pending(drawable->display->wl_display,
 						  drawable->wl_queue);
-		while (drawable->surface->frame_sync) {
+		while (drawable->surface->sync_obj) {
 			WSEGL_DEBUG("%s: %s: wait for sync (%p(@%p))\n",
-				    __FILE__, __func__, drawable->surface->frame_sync, &drawable->surface->frame_sync);
+				    __FILE__, __func__, drawable->surface->sync_obj, &drawable->surface->sync_obj);
 			if (wl_display_dispatch_queue(drawable->display->wl_display,
 						      drawable->wl_queue) < 0)
 				break;
@@ -1643,7 +1643,7 @@ static int wayland_commit_buffer(WLWSClientDrawable *drawable,
 	 */
 	if (interval > 0)
 		wayland_set_callback(drawable, wl_surface_frame(window->surface),
-				     &drawable->surface->frame_sync, "wl_surface_frame()");
+				     &drawable->surface->sync_obj, "wl_surface_frame()");
 
 	WSEGL_DEBUG("%s: %s: attach wl_buffer.\n", __FILE__, __func__);
 	/*
@@ -1666,10 +1666,16 @@ static int wayland_commit_buffer(WLWSClientDrawable *drawable,
 	wl_surface_commit(drawable->wl_surface_wrapper);
 
 	WSEGL_DEBUG("%s: %s: commited surface.\n", __FILE__, __func__);
-	// just to throttle.
-	if (!drawable->surface->frame_sync)
-		wayland_set_callback(drawable, wl_display_sync(drawable->display->wl_display), NULL,
-				     "wl_display_sync(1)");
+
+	/* If we're not waiting for a frame callback then we'll at least throttle
+	* to a sync callback so that we always give a chance for the compositor to
+	* handle the commit and send a release event before checking for a free
+	* buffer */
+	if (!drawable->surface->sync_obj)
+		wayland_set_callback(drawable, 
+					wl_display_sync(drawable->display->wl_display), 
+					drawable->surface->sync_obj,
+				     	"wl_display_sync(1)");
 
 	wl_display_flush(drawable->display->wl_display);
 
