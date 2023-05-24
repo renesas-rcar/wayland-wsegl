@@ -153,11 +153,6 @@ typedef struct {
         struct wl_callback      *sync_obj;
 } WLWSClientSurface;
 
-struct queue {
-	struct kms_buffer	*buffer;
-	struct queue		*next;
-};
-
 typedef struct WaylandWS_Client_Drawable_TAG
 {
 	WLWSClientDisplay       *display;
@@ -191,10 +186,6 @@ typedef struct WaylandWS_Client_Drawable_TAG
         struct kms_buffer       *current;       /* rendering buffer */
         struct kms_buffer       *source;        /* source buffer, i.e. previous one */
         int                     num_bufs;       /* number of used buffers */
-
-	struct queue		free_buffer_queue[MAX_BACK_BUFFERS];
-	struct queue		*free_buffer;
-	struct queue		*free_buffer_unused;
 
 	int                     ref_count;
 
@@ -390,41 +381,28 @@ static const struct wl_registry_listener wayland_registry_listener = {
 static void init_free_buffer_queue(WLWSClientDrawable *drawable)
 {
 	int i;
-	struct queue *queue = drawable->free_buffer_queue;
+	for (i = 0; i < drawable->num_bufs; i++) {
+    		struct kms_buffer *buffer = &drawable->buffers[i];
+   	 	buffer->flag &= ~KMS_BUFFER_FLAG_LOCKED;
+	}
 
-	drawable->free_buffer = queue;
-	for (i = 0; i < drawable->num_bufs; i++)
-	    queue[i].buffer = &drawable->buffers[i];
-
-	for (i = 0; i < drawable->num_bufs - 1; i++)
-	    queue[i].next = &queue[i + 1];
 }
 
 static inline void put_free_buffer(WLWSClientDrawable *drawable, struct kms_buffer *buffer)
 {
-	struct queue *item = drawable->free_buffer_unused;
-	if (!item) {
-		WSEGL_DEBUG("%s: %s: Unlikly queue item is NULL.\n", __FILE__, __func__);
-		return;
-	}
-
-	drawable->free_buffer_unused = item->next;
-	item->buffer = buffer;
-	item->next = drawable->free_buffer;
-	drawable->free_buffer = item;
+	buffer->flag &= ~KMS_BUFFER_FLAG_LOCKED;
 }
 
 static inline struct kms_buffer* get_free_buffer(WLWSClientDrawable *drawable)
 {
-	struct queue *item = drawable->free_buffer;
-	if (!item)
-		return NULL;
-
-	drawable->free_buffer = item->next;
-	item->next = drawable->free_buffer_unused;
-	drawable->free_buffer_unused = item;
-
-	return item->buffer;
+	int i;
+	for (i = 0; i < drawable->num_bufs; i++) {
+	    struct kms_buffer *buffer = &drawable->buffers[i];
+	    if(!IS_KMS_BUFFER_LOCKED(buffer)) {
+		return buffer;
+	    }
+	}
+	return NULL;
 }
 
 static void _kms_release_buffer(WLWSClientDrawable *drawable, struct kms_buffer *buffer);
@@ -439,7 +417,6 @@ static void wayland_buffer_release(void *data, struct wl_buffer *buffer)
 		struct kms_buffer *kms_buffer = &drawable->buffers[i];
 		if (kms_buffer->wl_buffer == buffer) {
 			WSEGL_DEBUG("%s: %s: buffer %d (%p) is released.\n", __FILE__, __func__, i, buffer);
-			kms_buffer->flag &= ~KMS_BUFFER_FLAG_LOCKED;
 			put_free_buffer(drawable, kms_buffer);
 			goto done;
 		}
@@ -609,7 +586,7 @@ static void wayland_wait_for_buffer_release(WLWSClientDrawable *drawable)
 	wl_display_dispatch_queue_pending(drawable->display->wl_display, drawable->wl_queue);
 	if (!drawable->current)
 		drawable->current = get_free_buffer(drawable);
-	while (!drawable->current || IS_KMS_BUFFER_LOCKED(drawable->current)) {
+	while (!drawable->current) {
 		WSEGL_DEBUG("%s: %s: current=%p\n", __FILE__, __func__,
 			    drawable->current);
 
