@@ -110,6 +110,7 @@ typedef struct WaylandWS_Client_Display_TAG
 enum {
 	KMS_BUFFER_FLAG_LOCKED	= 1,
 	KMS_BUFFER_FLAG_TYPE_BO	= 2,
+	KMS_BUFFER_FLAG_ERROR   = 4,
 };
 
 struct kms_buffer {
@@ -127,9 +128,12 @@ struct kms_buffer {
 
         /* pointing back to the drawable */
         void *drawable;
+	WLWSDrawableInfo        info;
 };
 
 #define IS_KMS_BUFFER_LOCKED(b)	((b)->flag & KMS_BUFFER_FLAG_LOCKED)
+#define BUFFER_NEEDS_TO_BE_RESIZED(window, b) ((window->width != b->info.width) || \
+        (window->height != b->info.height))
 
 #ifdef HAVE_WAYLAND_EGL_18_1_0
 #define GET_EGL_WINDOW_PRIVATE(window)		window->driver_private
@@ -393,19 +397,30 @@ static inline void put_free_buffer(WLWSClientDrawable *drawable, struct kms_buff
 	buffer->flag &= ~KMS_BUFFER_FLAG_LOCKED;
 }
 
+static int
+_kms_create_buffer(WLWSClientDrawable *drawable, struct kms_buffer *buffer);
+
+static void
+_kms_release_buffer(WLWSClientDrawable *drawable, struct kms_buffer *buffer);
+
 static inline struct kms_buffer* get_free_buffer(WLWSClientDrawable *drawable)
 {
 	int i;
 	for (i = 0; i < drawable->num_bufs; i++) {
 	    struct kms_buffer *buffer = &drawable->buffers[i];
 	    if(!IS_KMS_BUFFER_LOCKED(buffer)) {
+		WSEGL_DEBUG("Width: w=%d, b=%d\n", drawable->window->width, buffer->info.width);
+		WSEGL_DEBUG("Height: w=%d, b=%d\n", drawable->window->height, buffer->info.height);
+		if(BUFFER_NEEDS_TO_BE_RESIZED(drawable->window, buffer)) {
+		    _kms_release_buffer(drawable, buffer);
+		    if(_kms_create_buffer(drawable, buffer))
+			buffer->flag = KMS_BUFFER_FLAG_ERROR;
+		}
 		return buffer;
 	    }
 	}
 	return NULL;
 }
-
-static void _kms_release_buffer(WLWSClientDrawable *drawable, struct kms_buffer *buffer);
 
 static void wayland_buffer_release(void *data, struct wl_buffer *buffer)
 {
@@ -470,8 +485,9 @@ static const struct zwp_linux_buffer_params_v1_listener buffer_params_listener =
 };
 
 static struct wl_buffer*
-wayland_get_wl_buffer_from_zlinux_dmabuf(WLWSClientDrawable *drawable, int fd)
+wayland_get_wl_buffer_from_zlinux_dmabuf(WLWSClientDrawable *drawable, struct kms_buffer *buffer)
 {
+	int fd = buffer->prime_fd;
 	WLWSClientDisplay *display = drawable->display;
 
 	WSEGL_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
@@ -482,7 +498,7 @@ wayland_get_wl_buffer_from_zlinux_dmabuf(WLWSClientDrawable *drawable, int fd)
 	int ret = 0;
 
 	/* check the pixelformat */
-	switch (drawable->info.pixelformat) {
+	switch (buffer->info.pixelformat) {
 	case WLWSEGL_PIXFMT_ARGB8888:
 		if (!(drawable->enable_formats & ENABLE_FORMAT_ARGB8888))
 			goto err;
@@ -499,13 +515,13 @@ wayland_get_wl_buffer_from_zlinux_dmabuf(WLWSClientDrawable *drawable, int fd)
 
 	params = zwp_linux_dmabuf_v1_create_params(drawable->zlinux_dmabuf);
 
-	zwp_linux_buffer_params_v1_add(params, fd, 0, 0, drawable->info.pitch,
+	zwp_linux_buffer_params_v1_add(params, fd, 0, 0, buffer->info.pitch,
 				       drawable->modifier_hi, drawable->modifier_lo);
 	zwp_linux_buffer_params_v1_add_listener(params,
 						&buffer_params_listener,
 						&params_result);
 	zwp_linux_buffer_params_v1_create(
-		params, drawable->info.width, drawable->info.height,
+		params, buffer->info.width, buffer->info.height,
 		pixelformat, 0);
 	wl_display_flush(display->wl_display);
 
@@ -519,18 +535,19 @@ wayland_get_wl_buffer_from_zlinux_dmabuf(WLWSClientDrawable *drawable, int fd)
 err:
 	WSEGL_DEBUG("%s: %s: %d: unexpected pixelformat %x passed.\n",
 		    __FILE__, __func__, __LINE__,
-		    drawable->info.pixelformat);
+		    buffer->info.pixelformat);
 	return NULL;
 }
 
 static struct wl_buffer*
-wayland_get_wl_buffer_from_wl_kms(WLWSClientDrawable *drawable, int fd)
+wayland_get_wl_buffer_from_wl_kms(WLWSClientDrawable *drawable, struct kms_buffer *buffer)
 {
+	int fd = buffer->prime_fd;
 	uint32_t pixelformat;
 	WSEGL_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
 
 	/* check the pixelformat */
-	switch (drawable->info.pixelformat) {
+	switch (buffer->info.pixelformat) {
 	case WLWSEGL_PIXFMT_ARGB8888:
 		pixelformat = WL_KMS_FORMAT_ARGB8888;
 		break;
@@ -540,13 +557,13 @@ wayland_get_wl_buffer_from_wl_kms(WLWSClientDrawable *drawable, int fd)
 	default:
 		WSEGL_DEBUG("%s: %s: %d: unexpected pixelformat %x passed.\n",
 			    __FILE__, __func__, __LINE__,
-			    drawable->info.pixelformat);
+			    buffer->info.pixelformat);
 		return NULL;
 	}
 
 	return wl_kms_create_buffer(drawable->wl_kms, fd,
-				    drawable->info.width, drawable->info.height,
-				    drawable->info.pitch, pixelformat, 0);
+				    buffer->info.width, buffer->info.height,
+				    buffer->info.pitch, pixelformat, 0);
 }
 
 static struct wl_buffer* wayland_get_wl_buffer(struct kms_buffer *buffer)
@@ -560,11 +577,11 @@ static struct wl_buffer* wayland_get_wl_buffer(struct kms_buffer *buffer)
 	if (drawable->zlinux_dmabuf) {
 		buffer->wl_buffer =
 			wayland_get_wl_buffer_from_zlinux_dmabuf(
-				drawable, buffer->prime_fd);
+				drawable, buffer);
 	} else {
 		buffer->wl_buffer =
 			wayland_get_wl_buffer_from_wl_kms(drawable,
-							  buffer->prime_fd);
+							  buffer);
 	}
 
 	if (!buffer->wl_buffer)
@@ -781,7 +798,7 @@ static void _kms_release_buffer(WLWSClientDrawable *drawable, struct kms_buffer 
 		if (buffer->flag & KMS_BUFFER_FLAG_TYPE_BO)
 			kms_bo_unmap(buffer->bo);
 		else
-			munmap(buffer->addr, drawable->info.size);
+			munmap(buffer->addr, buffer->info.size);
 	}
 	if (buffer->prime_fd)
 		close(buffer->prime_fd);
@@ -791,6 +808,7 @@ static void _kms_release_buffer(WLWSClientDrawable *drawable, struct kms_buffer 
 
 	if (buffer->wl_buffer)
 		wl_buffer_destroy(buffer->wl_buffer);
+	memset(buffer, 0, sizeof(struct kms_buffer));
 }
 
 static void _kms_release_buffers(WLWSClientDrawable *drawable)
@@ -805,7 +823,6 @@ static void _kms_release_buffers(WLWSClientDrawable *drawable)
 	for (i = 0; i < drawable->num_bufs; i++) {
 		WSEGL_DEBUG("%s: %s: %d: i=%d:\n", __FILE__, __func__, __LINE__, i);
 		_kms_release_buffer(drawable, &drawable->buffers[i]);
-		memset(&drawable->buffers[i], 0, sizeof(struct kms_buffer));
 	}
 	WSEGL_DEBUG("%s: %s: %d: done\n", __FILE__, __func__, __LINE__);
 }
@@ -825,9 +842,9 @@ static int _kms_get_number_of_buffers(void)
 	return num_buffers;
 }
 
-static int _kms_create_buffers(WLWSClientDrawable *drawable)
+static int _kms_create_buffer(WLWSClientDrawable *drawable, struct kms_buffer *buffer)
 {
-	int i, err;
+	int err;
 	uint32_t handle;
 	WLWSClientDisplay *display = drawable->display;
 	unsigned attr[] = {
@@ -846,68 +863,58 @@ static int _kms_create_buffers(WLWSClientDrawable *drawable)
 	attr[3] = drawable->info.stride = ((drawable->info.width + 31) >> 5) << 5;
 	attr[5] = drawable->info.height;
 
-	// number of buffers
-	drawable->num_bufs = _kms_get_number_of_buffers();
+	if ((err = kms_bo_create(drawable->kms, attr, &buffer->bo)))
+		goto kms_error;
 
-	for (i = 0; i < drawable->num_bufs; i++) {
-		if ((err = kms_bo_create(drawable->kms, attr, &drawable->buffers[i].bo)))
-			goto kms_error;
+	kms_bo_get_prop(buffer->bo, KMS_HANDLE, &handle);
 
-		kms_bo_get_prop(drawable->buffers[i].bo, KMS_HANDLE, &handle);
-
-		if (drmPrimeHandleToFD(drawable->fd, handle, DRM_CLOEXEC,
-				       &drawable->buffers[i].prime_fd)) {
-			WSEGL_DEBUG(
-				"%s: %s: %d: drmPrimeHandleToFD failed. %s\n",
-				__FILE__, __func__, __LINE__, strerror(errno));
-			goto kms_error;
-		}
-
-		WSEGL_DEBUG("%s: %s: %d (prime_fd=%d)\n", __FILE__, __func__,
-			    __LINE__, drawable->buffers[i].prime_fd);
-
-		drawable->buffers[i].flag |= KMS_BUFFER_FLAG_TYPE_BO;
-
-		drawable->buffers[i].drawable = drawable;
+	if (drmPrimeHandleToFD(drawable->fd, handle, DRM_CLOEXEC,
+			       &buffer->prime_fd)) {
+		WSEGL_DEBUG(
+			"%s: %s: %d: drmPrimeHandleToFD failed. %s\n",
+			__FILE__, __func__, __LINE__, strerror(errno));
+		goto kms_error;
 	}
 
-	kms_bo_get_prop(drawable->buffers[0].bo, KMS_PITCH, (unsigned int*)&drawable->info.pitch);
+	WSEGL_DEBUG("%s: %s: %d (prime_fd=%d)\n", __FILE__, __func__,
+		    __LINE__, buffer->prime_fd);
+
+	buffer->flag |= KMS_BUFFER_FLAG_TYPE_BO;
+
+	buffer->drawable = drawable;
+
+	kms_bo_get_prop(buffer->bo, KMS_PITCH, (unsigned int*)&drawable->info.pitch);
 	drawable->info.size = drawable->info.pitch * drawable->info.height;
 
 	WSEGL_DEBUG("%s: %s: %d: size=%d, %dx%d, pitch=%d, stride=%d\n", __FILE__, __func__, __LINE__,
 		    drawable->info.size, drawable->info.width, drawable->info.height, drawable->info.pitch, drawable->info.stride);
 	/* Wrap KMS BO with PVR service */
 	pthread_mutex_lock(&display->pvr_ctx_mutex);
-	for (i = 0; i < drawable->num_bufs; i++) {
-		if (!(drawable->buffers[i].map =
-		      pvr_map_dmabuf(display->context,
-				     drawable->buffers[i].prime_fd,
-				     CLIENT_PVR_MAP_NAME))){
-			pthread_mutex_unlock(&display->pvr_ctx_mutex);
-			goto kms_error;
-		}
+	if (!(buffer->map =
+	      pvr_map_dmabuf(display->context,
+			     buffer->prime_fd,
+			     CLIENT_PVR_MAP_NAME))){
+		pthread_mutex_unlock(&display->pvr_ctx_mutex);
+		goto kms_error;
 	}
+	buffer->info = drawable->info;
 	pthread_mutex_unlock(&display->pvr_ctx_mutex);
 
 	return 0;
 
 kms_error:
 	WSEGL_DEBUG("%s: %s: %d: %s\n", __FILE__, __func__, __LINE__, strerror((err == -1) ? errno : err));
-		    _kms_release_buffers(drawable);
+	_kms_release_buffer(drawable, buffer);
 
 	return -1;
 }
 
 static void _kms_resize_callback(struct wl_egl_window *window, void *private)
 {
-	WLWSClientDrawable *drawable = private;
+	WSEGL_UNREFERENCED_PARAMETER(private);
 	WSEGL_UNREFERENCED_PARAMETER(window);
 
 	WSEGL_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
-
-	if (drawable->info.width  != drawable->window->width ||
-	    drawable->info.height != drawable->window->height)
-		drawable->resized = 1;
 }
 
 /***********************************************************************************
@@ -925,6 +932,8 @@ static WSEGLError WSEGLc_CreateWindowDrawable(WSEGLDisplayHandle hDisplay,
 					      WLWSEGL_COLOURSPACE_FORMAT eColorSpace,
 					      bool bIsProtected)
 {
+	int i = 0;
+	int j = 0; 
 	WSEGLError err = WSEGL_CANNOT_INITIALISE;
 	WLWSClientDisplay *display = (WLWSClientDisplay*)hDisplay;
 	WLWSClientDrawable *drawable;
@@ -998,13 +1007,20 @@ static WSEGLError WSEGLc_CreateWindowDrawable(WSEGLDisplayHandle hDisplay,
 		goto fail;
 	}
 
-	/* Create KMS BO for rendering. */
-	if (_kms_create_buffers(drawable))
+	/* number of buffers */
+	drawable->num_bufs = _kms_get_number_of_buffers();
+
+	for (i = 0; i < drawable->num_bufs; i++) {
+	    /* Create KMS BO for rendering. */
+	    if (_kms_create_buffer(drawable, &drawable->buffers[i]))
 		goto fail;
+	}
 
 	/* now set the current rendering buffer */
 	init_free_buffer_queue(drawable);
 	drawable->current = get_free_buffer(drawable);
+	if(drawable->current->flag == KMS_BUFFER_FLAG_ERROR)
+	    goto fail;
 
 	/* set swap interval, either default value or whatever previously set before resizing */
 	if (GET_EGL_WINDOW_PRIVATE(drawable->window)) {
@@ -1035,6 +1051,8 @@ static WSEGLError WSEGLc_CreateWindowDrawable(WSEGLDisplayHandle hDisplay,
 	return WSEGL_SUCCESS;
 
 fail:
+	for(j=0;j<i;j++)
+    		_kms_release_buffer(drawable, &drawable->buffers[i]);
 	if (drawable->kms)
 		kms_destroy(&drawable->kms);
 	if (drawable->fd >= 0)
@@ -1155,6 +1173,7 @@ static WLWSClientDrawable *import_wl_kms_buffer(WLWSClientDisplay *display, stru
 	wl_resource_add_destroy_listener(
 		buffer->resource, &drawable->kms_buffer_destroy_listener);
 	drawable->pixmap_kms_buffer_in_use = 1;
+	drawable->current->info = drawable->info;
 
 	return drawable;
 
@@ -1378,6 +1397,7 @@ static WLWSClientDrawable *import_native_rel_buffer(WLWSClientDisplay *display, 
 	drawable->info.stride = buffer->stride;
 	drawable->info.size   = (drawable->info.stride * drawable->info.height * bpp) >> 3;
 	drawable->current->addr = buffer->pixelData;
+	drawable->current->info = drawable->info;
 
 	WSEGL_DEBUG("%s: %s: %d: buffer = %p (%dx%d, stride(pitch in wsegl)=%d, size=%d, format=%08x)\n",
 			__FILE__, __func__, __LINE__, buffer, buffer->width, buffer->height, buffer->stride, drawable->info.size, buffer->format);
@@ -1437,7 +1457,7 @@ static WSEGLError WSEGLc_CreatePixmapDrawable(WSEGLDisplayHandle hDisplay,
 	}
 
 	pthread_mutex_lock(&display->pvr_ctx_mutex);
-	if (!(drawable->current->map = pvr_map_memory(display->context, drawable->current->addr, drawable->info.size))){
+	if (!(drawable->current->map = pvr_map_memory(display->context, drawable->current->addr, drawable->current->info.size))){
 		pthread_mutex_unlock(&display->pvr_ctx_mutex);
 		goto error;
 	}
@@ -1447,6 +1467,8 @@ static WSEGLError WSEGLc_CreatePixmapDrawable(WSEGLDisplayHandle hDisplay,
 	drawable->ref_count = 1;
 
 	*phDrawable = (WSEGLDrawableHandle)drawable;
+	drawable->current->info = drawable->info;
+	
 	return WSEGL_SUCCESS;
 
 error:
@@ -1593,16 +1615,16 @@ static int wayland_commit_buffer(WLWSClientDrawable *drawable,
 	 */
 	wl_surface_attach(drawable->wl_surface_wrapper, buffer, window->dx, window->dy);
 
-	window->attached_width = drawable->info.width;
-	window->attached_height = drawable->info.height;
+	window->attached_width = kms_buffer->info.width;
+	window->attached_height = kms_buffer->info.height;
 	window->dx = window->dy = 0;
 
 	if (num_rects && drawable->enable_damage_buffer)
-		wayland_surface_damage_buffer(drawable->wl_surface_wrapper, &drawable->info,
+		wayland_surface_damage_buffer(drawable->wl_surface_wrapper, &kms_buffer->info,
 					      rects, num_rects);
 	else
 		wl_surface_damage(drawable->wl_surface_wrapper, 0, 0,
-				  drawable->info.width, drawable->info.height);
+				  kms_buffer->info.width, kms_buffer->info.height);
 
 	wl_surface_commit(drawable->wl_surface_wrapper);
 
@@ -1866,24 +1888,18 @@ static WSEGLError WSEGLc_GetDrawableParameters(WSEGLDrawableHandle hDrawable,
 	WSEGL_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
 
 	/*
-	 * This will let IMG EGL to delete the drawable, and then recreate
-	 * the drawable from the native window, i.e. drawable->resized is reset
-	 * automatically.
-	 */
-	if (drawable->resized)
-		return WSEGL_BAD_DRAWABLE;
-
-	/*
 	 * We need to wait for buffer release if the drawable is a window.
 	 */
 	wayland_wait_for_buffer_release(drawable);
+	if(drawable->current->flag == KMS_BUFFER_FLAG_ERROR)
+    		return WSEGL_BAD_DRAWABLE;;
 
 	memset(psRenderParams, 0, sizeof(*psRenderParams));
-	pvr_get_params(drawable->current->map, &drawable->info, psRenderParams);
+	pvr_get_params(drawable->current->map, &drawable->current->info, psRenderParams);
 	psRenderParams->sBase.i32BufferAge = drawable->current->buffer_age;
 	if (drawable->source) {
 		memset(psSourceParams, 0, sizeof(*psSourceParams));
-		pvr_get_params(drawable->source->map, &drawable->info, psSourceParams);
+		pvr_get_params(drawable->source->map, &drawable->source->info, psSourceParams);
 		psSourceParams->sBase.i32BufferAge = drawable->source->buffer_age;
 	} else {
 		memcpy(psSourceParams, psRenderParams, sizeof(*psSourceParams));
@@ -1907,7 +1923,7 @@ static WSEGLError WSEGLc_GetImageParameters(WSEGLDrawableHandle hDrawable,
 	WSEGL_UNREFERENCED_PARAMETER(ulPlaneOffset);
 
 	memset(psImageParams, 0, sizeof(*psImageParams));
-	if (!pvr_get_image_params(drawable->current->map, &drawable->info, psImageParams)) {
+	if(!pvr_get_image_params(drawable->current->map, &drawable->current->info, psImageParams)) {
 		return WSEGL_BAD_NATIVE_PIXMAP;
 	}
 
