@@ -33,6 +33,7 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #include <xf86drm.h>
 #include <drm_fourcc.h>
@@ -66,13 +67,6 @@
 const char *ENV_NUM_BUFFERS = "WSEGL_NUM_BUFFERS";
 const char *PVRCONF_NUM_BUFFERS = "WseglNumBuffers";
 
-/*
- * Set to non-zero to eanble an aggressive sync mode. This must be enabled
- * when a fullscreen mode is used with gl-renderer with double buffering mode.
- */
-const char *ENV_ENABLE_AGGRESSIVE_SYNC = "WSEGL_ENABLE_AGGRESSIVE_SYNC";
-const char *PVRCONF_ENABLE_AGGRESSIVE_SYNC = "WseglEnableAggressiveSync";
-
 /* enable formats */
 enum {
 	ENABLE_FORMAT_ARGB8888 = 1 << 0,
@@ -100,32 +94,11 @@ typedef struct WaylandWS_Client_Display_TAG
 {
         /* For Wayland display */
         struct wl_display       *wl_display;
-        struct wl_event_queue   *wl_queue;
-        struct wl_registry      *wl_registry;
-        struct wl_kms           *wl_kms;
-        struct zwp_linux_dmabuf_v1      *zlinux_dmabuf;
-	int			display_connected;
-
-        /* for sync/frame events */
-        struct wl_callback      *callback;
-
-        /* For KMS used in the client */
-        int                     fd;
-        struct kms_driver       *kms;
-        int                     authenticated;
+        int                     display_connected;
 
         /* PVR context */
         struct pvr_context      *context;
-
-        /* mode setting */
-        int                     aggressive_sync;
-
-	/* for check format */
-	int			enable_formats;
-
-	/* drm modifier */
-	uint32_t		modifier_lo;
-	uint32_t		modifier_hi;
+        pthread_mutex_t         pvr_ctx_mutex;
 } WLWSClientDisplay;
 
 /* Do not change the following number. */
@@ -137,6 +110,7 @@ typedef struct WaylandWS_Client_Display_TAG
 enum {
 	KMS_BUFFER_FLAG_LOCKED	= 1,
 	KMS_BUFFER_FLAG_TYPE_BO	= 2,
+	KMS_BUFFER_FLAG_ERROR   = 4,
 };
 
 struct kms_buffer {
@@ -154,9 +128,12 @@ struct kms_buffer {
 
         /* pointing back to the drawable */
         void *drawable;
+	WLWSDrawableInfo        info;
 };
 
 #define IS_KMS_BUFFER_LOCKED(b)	((b)->flag & KMS_BUFFER_FLAG_LOCKED)
+#define BUFFER_NEEDS_TO_BE_RESIZED(window, b) ((window->width != b->info.width) || \
+        (window->height != b->info.height))
 
 #ifdef HAVE_WAYLAND_EGL_18_1_0
 #define GET_EGL_WINDOW_PRIVATE(window)		window->driver_private
@@ -177,17 +154,32 @@ typedef enum {
 
 typedef struct {
         int                     interval;
-        struct wl_callback      *frame_sync;
+        struct wl_callback      *sync_obj;
 } WLWSClientSurface;
-
-struct queue {
-	struct kms_buffer	*buffer;
-	struct queue		*next;
-};
 
 typedef struct WaylandWS_Client_Drawable_TAG
 {
-        struct wl_egl_window    *window;
+	WLWSClientDisplay       *display;
+	struct wl_event_queue   *wl_queue;
+	struct wl_registry      *wl_registry;
+	struct wl_kms           *wl_kms;
+	struct zwp_linux_dmabuf_v1      *zlinux_dmabuf;
+	struct wl_display       *wl_display_wrapper;
+	struct wl_surface       *wl_surface_wrapper;
+
+	/* For KMS used in the client */
+	int                     fd;
+	struct kms_driver       *kms;
+	int                     authenticated;
+
+	/* for check format */
+	int                     enable_formats;
+
+	/* drm modifier */
+	uint32_t                modifier_lo;
+	uint32_t                modifier_hi;
+
+	struct wl_egl_window    *window;
 	bool			enable_damage_buffer;
 
         WLWSDrawableInfo        info;
@@ -199,13 +191,7 @@ typedef struct WaylandWS_Client_Drawable_TAG
         struct kms_buffer       *source;        /* source buffer, i.e. previous one */
         int                     num_bufs;       /* number of used buffers */
 
-	struct queue		free_buffer_queue[MAX_BACK_BUFFERS];
-	struct queue		*free_buffer;
-	struct queue		*free_buffer_unused;
-
-        WLWSClientDisplay       *display;
-
-        int                     ref_count;
+	int                     ref_count;
 
         struct wl_listener      kms_buffer_destroy_listener;
         int                     pixmap_kms_buffer_in_use;
@@ -240,14 +226,14 @@ static const struct wl_callback_listener wayland_sync_listener = {
 /*
  * Wayland callback setting
  */
-static void wayland_set_callback(WLWSClientDisplay *display,
+static void wayland_set_callback(WLWSClientDrawable *drawable,
 				 struct wl_callback *callback,
 				 struct wl_callback **flag, const char *name)
 {
-	struct wl_event_queue *queue = display->wl_queue;
+	struct wl_event_queue *queue = drawable->wl_queue;
 
 	if (!flag)
-		flag = &display->callback;
+		flag = &drawable->surface->sync_obj;
 #if defined(DEBUG)
        WSEGL_DEBUG("%s: %s: callback=%s(%p)\n", __FILE__, __func__, name, callback);
 #else
@@ -274,19 +260,19 @@ quit:
 
 static void wayland_kms_handle_device(void *data, struct wl_kms *kms, const char *device)
 {
-	WLWSClientDisplay *display = data;
+	WLWSClientDrawable *drawable = data;
 	drm_magic_t magic;
 
 	WSEGL_DEBUG("%s: %s: %d (device=%s)\n", __FILE__, __func__, __LINE__, device);
 
-	if ((display->fd = open(device, O_RDWR | O_CLOEXEC)) < 0) {
+	if ((drawable->fd = open(device, O_RDWR | O_CLOEXEC)) < 0) {
 		WSEGL_DEBUG("%s: %s: %d: Can't open %s (%s)\n",
 			    __FILE__, __func__, __LINE__, device, strerror(errno));
 		return;
 	}
 
 	/* we can now request for authentication */
-	drmGetMagic(display->fd, &magic);
+	drmGetMagic(drawable->fd, &magic);
 	wl_kms_authenticate(kms, magic);
 }
 
@@ -296,17 +282,17 @@ static void wayland_kms_handle_format(void *data, struct wl_kms *kms, uint32_t f
 	WSEGL_UNREFERENCED_PARAMETER(kms);
 	WSEGL_UNREFERENCED_PARAMETER(format);
 
-	//WLWSClientDisplay *display = data;
 	WSEGL_DEBUG("%s: %s: %d (format=%08x)\n", __FILE__, __func__, __LINE__, format);
 }
 
 static void wayland_kms_handle_authenticated(void *data, struct wl_kms *kms)
 {
-	WLWSClientDisplay *display = data;
 	WSEGL_UNREFERENCED_PARAMETER(kms);
+	WLWSClientDrawable *drawable = data;
+
 	WSEGL_DEBUG("%s: %s: %d: authenticated.\n", __FILE__, __func__, __LINE__);
 
-	display->authenticated = 1;
+	drawable->authenticated = 1;
 }
 
 static const struct wl_kms_listener wayland_kms_listener = {
@@ -330,23 +316,23 @@ static void dmabuf_modifiers(void *data, struct zwp_linux_dmabuf_v1 *dmabuf,
 			     uint32_t modifier_lo)
 {
 	WSEGL_UNREFERENCED_PARAMETER(dmabuf);
-	WLWSClientDisplay *display = data;
+	WLWSClientDrawable *drawable = data;
 	uint64_t modifier = ((uint64_t)modifier_hi << 32) | modifier_lo;
 
 	switch (format) {
 	case DRM_FORMAT_ARGB8888:
-		display->enable_formats |= ENABLE_FORMAT_ARGB8888;
+		drawable->enable_formats |= ENABLE_FORMAT_ARGB8888;
 		break;
 	case DRM_FORMAT_XRGB8888:
-		display->enable_formats |= ENABLE_FORMAT_XRGB8888;
+		drawable->enable_formats |= ENABLE_FORMAT_XRGB8888;
 		break;
 	default:
 		return;
 	}
 
 	if (modifier == DRM_FORMAT_MOD_LINEAR) {
-		display->modifier_lo = modifier_lo;
-		display->modifier_hi = modifier_hi;
+		drawable->modifier_lo = modifier_lo;
+		drawable->modifier_hi = modifier_hi;
 	}
 }
 
@@ -362,18 +348,21 @@ static const struct zwp_linux_dmabuf_v1_listener dmabuf_listener = {
 static void wayland_registry_handle_global(void *data, struct wl_registry *registry,
 					   uint32_t name, const char *interface, uint32_t version)
 {
-	WLWSClientDisplay *display = data;
+	WLWSClientDrawable *drawable = data;
 
 	WSEGL_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
 	/*
 	 * we need to connect to the wl_kms objects
 	 */
 	if (!strcmp(interface, "wl_kms")) {
-		display->wl_kms = wl_registry_bind(registry, name, &wl_kms_interface, version);
+		drawable->wl_kms = wl_registry_bind(registry, name, &wl_kms_interface, version);
+		wl_kms_add_listener(drawable->wl_kms, &wayland_kms_listener, drawable);
+		WSEGL_DEBUG("%s: %s: %d found  wl_kms \n", __FILE__, __func__, __LINE__);
 	} else if (!strcmp(interface, "zwp_linux_dmabuf_v1")) {
-		display->zlinux_dmabuf =
+		drawable->zlinux_dmabuf =
 			wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface, version);
-		zwp_linux_dmabuf_v1_add_listener (display->zlinux_dmabuf, &dmabuf_listener, display);
+		zwp_linux_dmabuf_v1_add_listener (drawable->zlinux_dmabuf, &dmabuf_listener, drawable);
+		WSEGL_DEBUG("%s: %s: %d found zwp_linux_dmabuf_v1 \n", __FILE__, __func__, __LINE__);
 	}
 }
 
@@ -396,44 +385,42 @@ static const struct wl_registry_listener wayland_registry_listener = {
 static void init_free_buffer_queue(WLWSClientDrawable *drawable)
 {
 	int i;
-	struct queue *queue = drawable->free_buffer_queue;
+	for (i = 0; i < drawable->num_bufs; i++) {
+    		struct kms_buffer *buffer = &drawable->buffers[i];
+   	 	buffer->flag &= ~KMS_BUFFER_FLAG_LOCKED;
+	}
 
-	drawable->free_buffer = queue;
-	for (i = 0; i < drawable->num_bufs; i++)
-	    queue[i].buffer = &drawable->buffers[i];
-
-	for (i = 0; i < drawable->num_bufs - 1; i++)
-	    queue[i].next = &queue[i + 1];
 }
 
 static inline void put_free_buffer(WLWSClientDrawable *drawable, struct kms_buffer *buffer)
 {
-	struct queue *item = drawable->free_buffer_unused;
-	if (!item) {
-		WSEGL_DEBUG("%s: %s: Unlikly queue item is NULL.\n", __FILE__, __func__);
-		return;
-	}
-
-	drawable->free_buffer_unused = item->next;
-	item->buffer = buffer;
-	item->next = drawable->free_buffer;
-	drawable->free_buffer = item;
+	buffer->flag &= ~KMS_BUFFER_FLAG_LOCKED;
 }
+
+static int
+_kms_create_buffer(WLWSClientDrawable *drawable, struct kms_buffer *buffer);
+
+static void
+_kms_release_buffer(WLWSClientDrawable *drawable, struct kms_buffer *buffer);
 
 static inline struct kms_buffer* get_free_buffer(WLWSClientDrawable *drawable)
 {
-	struct queue *item = drawable->free_buffer;
-	if (!item)
-		return NULL;
-
-	drawable->free_buffer = item->next;
-	item->next = drawable->free_buffer_unused;
-	drawable->free_buffer_unused = item;
-
-	return item->buffer;
+	int i;
+	for (i = 0; i < drawable->num_bufs; i++) {
+	    struct kms_buffer *buffer = &drawable->buffers[i];
+	    if(!IS_KMS_BUFFER_LOCKED(buffer)) {
+		WSEGL_DEBUG("Width: w=%d, b=%d\n", drawable->window->width, buffer->info.width);
+		WSEGL_DEBUG("Height: w=%d, b=%d\n", drawable->window->height, buffer->info.height);
+		if(BUFFER_NEEDS_TO_BE_RESIZED(drawable->window, buffer)) {
+		    _kms_release_buffer(drawable, buffer);
+		    if(_kms_create_buffer(drawable, buffer))
+			buffer->flag = KMS_BUFFER_FLAG_ERROR;
+		}
+		return buffer;
+	    }
+	}
+	return NULL;
 }
-
-static void _kms_release_buffer(WLWSClientDrawable *drawable, struct kms_buffer *buffer);
 
 static void wayland_buffer_release(void *data, struct wl_buffer *buffer)
 {
@@ -445,7 +432,6 @@ static void wayland_buffer_release(void *data, struct wl_buffer *buffer)
 		struct kms_buffer *kms_buffer = &drawable->buffers[i];
 		if (kms_buffer->wl_buffer == buffer) {
 			WSEGL_DEBUG("%s: %s: buffer %d (%p) is released.\n", __FILE__, __func__, i, buffer);
-			kms_buffer->flag &= ~KMS_BUFFER_FLAG_LOCKED;
 			put_free_buffer(drawable, kms_buffer);
 			goto done;
 		}
@@ -499,23 +485,27 @@ static const struct zwp_linux_buffer_params_v1_listener buffer_params_listener =
 };
 
 static struct wl_buffer*
-wayland_get_wl_buffer_from_zlinux_dmabuf(WLWSClientDisplay *display,
-					 WLWSClientDrawable *drawable, int fd)
+wayland_get_wl_buffer_from_zlinux_dmabuf(WLWSClientDrawable *drawable, struct kms_buffer *buffer)
 {
+	int fd = buffer->prime_fd;
+	WLWSClientDisplay *display = drawable->display;
+
+	WSEGL_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
+
 	uint32_t pixelformat;
 	struct zwp_linux_buffer_params_v1 *params;
 	struct dmabuf_params_result params_result = {NULL, 0};
 	int ret = 0;
 
 	/* check the pixelformat */
-	switch (drawable->info.pixelformat) {
+	switch (buffer->info.pixelformat) {
 	case WLWSEGL_PIXFMT_ARGB8888:
-		if (!(display->enable_formats & ENABLE_FORMAT_ARGB8888))
+		if (!(drawable->enable_formats & ENABLE_FORMAT_ARGB8888))
 			goto err;
 		pixelformat = DRM_FORMAT_ARGB8888;
 		break;
 	case WLWSEGL_PIXFMT_XRGB8888:
-		if (!(display->enable_formats & ENABLE_FORMAT_XRGB8888))
+		if (!(drawable->enable_formats & ENABLE_FORMAT_XRGB8888))
 			goto err;
 		pixelformat = DRM_FORMAT_XRGB8888;
 		break;
@@ -523,21 +513,21 @@ wayland_get_wl_buffer_from_zlinux_dmabuf(WLWSClientDisplay *display,
 		goto err;
 	}
 
-	params = zwp_linux_dmabuf_v1_create_params(display->zlinux_dmabuf);
-	wl_proxy_set_queue((struct wl_proxy*)params, display->wl_queue);
-	zwp_linux_buffer_params_v1_add(params, fd, 0, 0, drawable->info.pitch,
-				       display->modifier_hi, display->modifier_lo);
+	params = zwp_linux_dmabuf_v1_create_params(drawable->zlinux_dmabuf);
+
+	zwp_linux_buffer_params_v1_add(params, fd, 0, 0, buffer->info.pitch,
+				       drawable->modifier_hi, drawable->modifier_lo);
 	zwp_linux_buffer_params_v1_add_listener(params,
 						&buffer_params_listener,
 						&params_result);
 	zwp_linux_buffer_params_v1_create(
-		params, drawable->info.width, drawable->info.height,
+		params, buffer->info.width, buffer->info.height,
 		pixelformat, 0);
 	wl_display_flush(display->wl_display);
 
 	while (ret >= 0 && !params_result.done) {
 		ret = wl_display_dispatch_queue(display->wl_display,
-						display->wl_queue);
+						drawable->wl_queue);
 	}
 
 	return params_result.wl_buffer;
@@ -545,18 +535,19 @@ wayland_get_wl_buffer_from_zlinux_dmabuf(WLWSClientDisplay *display,
 err:
 	WSEGL_DEBUG("%s: %s: %d: unexpected pixelformat %x passed.\n",
 		    __FILE__, __func__, __LINE__,
-		    drawable->info.pixelformat);
+		    buffer->info.pixelformat);
 	return NULL;
 }
 
 static struct wl_buffer*
-wayland_get_wl_buffer_from_wl_kms(WLWSClientDisplay *display,
-				  WLWSClientDrawable *drawable, int fd)
+wayland_get_wl_buffer_from_wl_kms(WLWSClientDrawable *drawable, struct kms_buffer *buffer)
 {
+	int fd = buffer->prime_fd;
 	uint32_t pixelformat;
+	WSEGL_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
 
 	/* check the pixelformat */
-	switch (drawable->info.pixelformat) {
+	switch (buffer->info.pixelformat) {
 	case WLWSEGL_PIXFMT_ARGB8888:
 		pixelformat = WL_KMS_FORMAT_ARGB8888;
 		break;
@@ -566,16 +557,16 @@ wayland_get_wl_buffer_from_wl_kms(WLWSClientDisplay *display,
 	default:
 		WSEGL_DEBUG("%s: %s: %d: unexpected pixelformat %x passed.\n",
 			    __FILE__, __func__, __LINE__,
-			    drawable->info.pixelformat);
+			    buffer->info.pixelformat);
 		return NULL;
 	}
 
-	return wl_kms_create_buffer(display->wl_kms, fd,
-				    drawable->info.width, drawable->info.height,
-				    drawable->info.pitch, pixelformat, 0);
+	return wl_kms_create_buffer(drawable->wl_kms, fd,
+				    buffer->info.width, buffer->info.height,
+				    buffer->info.pitch, pixelformat, 0);
 }
 
-static struct wl_buffer* wayland_get_wl_buffer(WLWSClientDisplay *display, struct kms_buffer *buffer)
+static struct wl_buffer* wayland_get_wl_buffer(struct kms_buffer *buffer)
 {
 	WLWSClientDrawable *drawable = buffer->drawable;
 
@@ -583,22 +574,20 @@ static struct wl_buffer* wayland_get_wl_buffer(WLWSClientDisplay *display, struc
 	if (buffer->wl_buffer)
 		goto done;
 
-	if (display->zlinux_dmabuf) {
+	if (drawable->zlinux_dmabuf) {
 		buffer->wl_buffer =
 			wayland_get_wl_buffer_from_zlinux_dmabuf(
-					display, drawable, buffer->prime_fd);
+				drawable, buffer);
 	} else {
 		buffer->wl_buffer =
-			wayland_get_wl_buffer_from_wl_kms(display, drawable,
-							  buffer->prime_fd);
+			wayland_get_wl_buffer_from_wl_kms(drawable,
+							  buffer);
 	}
 
 	if (!buffer->wl_buffer)
 		return NULL;
 
 	WSEGL_DEBUG("%s: %s: %d: wl_buffer=%p\n", __FILE__, __func__, __LINE__, buffer->wl_buffer);
-
-	wl_proxy_set_queue((struct wl_proxy*)buffer->wl_buffer, display->wl_queue);
 	wl_buffer_add_listener(buffer->wl_buffer, &wayland_buffer_listener, drawable);
 
 done:
@@ -611,27 +600,16 @@ static void wayland_wait_for_buffer_release(WLWSClientDrawable *drawable)
 
 	WSEGL_DEBUG("%s: %s\n", __FILE__, __func__);
 
-	wl_display_dispatch_queue_pending(display->wl_display, display->wl_queue);
+	wl_display_dispatch_queue_pending(drawable->display->wl_display, drawable->wl_queue);
 	if (!drawable->current)
 		drawable->current = get_free_buffer(drawable);
-	while (!drawable->current || IS_KMS_BUFFER_LOCKED(drawable->current)) {
-		WSEGL_DEBUG("%s: %s: current=%p, callback=%p\n", __FILE__, __func__,
-			    drawable->current, display->callback);
+	while (!drawable->current) {
+		WSEGL_DEBUG("%s: %s: current=%p\n", __FILE__, __func__,
+			    drawable->current);
 
-		if (display->aggressive_sync)
-			wayland_set_callback(display, wl_display_sync(display->wl_display),
-					     NULL, "wl_display_sync(2)");
-
-		if (wl_display_dispatch_queue(display->wl_display, display->wl_queue) < 0)
+		if (wl_display_dispatch_queue(display->wl_display, drawable->wl_queue) < 0)
 			break;
 		drawable->current = get_free_buffer(drawable);
-	}
-
-	/* we maybe in the wrong situation. wayland backend sometime drops the request. */
-	if (display->callback) {
-		WSEGL_DEBUG("%s: %s: destroying callback. something went wrong.\n", __FILE__, __func__);
-		wl_callback_destroy(display->callback);
-		display->callback = NULL;
 	}
 
 	WSEGL_DEBUG("%s: %s: buffer unlocked\n", __FILE__, __func__);
@@ -662,49 +640,54 @@ static int get_config_value(const char *pvr_key, const char *env_key, int defaul
 	return get_env_value(env_key, default_value);
 }
 
-static bool authenticate_kms_device(WLWSClientDisplay *display)
+static bool authenticate_kms_device(WLWSClientDrawable *drawable)
 {
-	if (!display->wl_kms)
+	WLWSClientDisplay *display = drawable->display;
+
+	if (!drawable->wl_kms)
 		return false;
 
-	wl_kms_add_listener(display->wl_kms, &wayland_kms_listener, display);
+	wl_kms_add_listener(drawable->wl_kms, &wayland_kms_listener, display);
 
-	if (wl_display_roundtrip_queue(display->wl_display, display->wl_queue) < 0 || display->fd == -1) {
+	if (wl_display_roundtrip_queue(display->wl_display, drawable->wl_queue) < 0 || drawable->fd == -1) {
 		// no DRM device given
 		return false;
 	}
 
-	if (wl_display_roundtrip_queue(display->wl_display, display->wl_queue) < 0 || !display->authenticated) {
+	if (wl_display_roundtrip_queue(display->wl_display, drawable->wl_queue) < 0 || !drawable->authenticated) {
 		// Authentication failed...
 		return false;
 	}
 	return true;
 }
 
-static bool setup_drm_device(WLWSClientDisplay *display)
+static bool setup_drm_device(WLWSClientDrawable *drawable)
 {
-	display->fd = -1;
+	WLWSClientDisplay *display = drawable->display;
+	drawable->fd = -1;
 
-	if (wl_display_roundtrip_queue(display->wl_display, display->wl_queue) < 0)
+	if (wl_display_roundtrip_queue(display->wl_display, drawable->wl_queue) < 0)
 		return false;
 
-	if (display->zlinux_dmabuf)
-		display->fd = drmOpenWithType(RENDER_NODE_MODULE, NULL, DRM_NODE_RENDER);
+	if (drawable->zlinux_dmabuf)
+		drawable->fd = drmOpenWithType(RENDER_NODE_MODULE, NULL, DRM_NODE_RENDER);
 
-	if (display->fd >= 0)
+	if (drawable->fd >= 0)
 		return true;
 
 	/* Fallback to authentication via wl_kms */
-	return authenticate_kms_device(display);
+	return authenticate_kms_device(drawable);
 }
 
-static bool ensure_supported_dmabuf_formats(WLWSClientDisplay *display)
+static bool ensure_supported_dmabuf_formats(WLWSClientDrawable *drawable)
 {
-	if (!display->zlinux_dmabuf)
+	WLWSClientDisplay *display = drawable->display;
+
+	if (!drawable->zlinux_dmabuf)
 		return true;
 
-	if (wl_display_roundtrip_queue(display->wl_display, display->wl_queue) < 0 ||
-            !display->enable_formats) {
+	if (wl_display_roundtrip_queue(display->wl_display, drawable->wl_queue) < 0 ||
+            !drawable->enable_formats) {
 		/* No supported dmabuf pixel formats */
 		return false;
 	}
@@ -746,49 +729,19 @@ static WSEGLError WSEGLc_InitialiseDisplay(NativeDisplayType hNativeDisplay,
 	} else {
 		display->wl_display = (struct wl_display*)hNativeDisplay;
 	}
-	display->fd = -1;
 
 	/*
-	 * Initialize modifier
+	 * Q?: should PVR context be surface specific ?
+	 * Q?: should we create this context for each eglsurface ?
 	 */
-	display->modifier_hi = DRM_FORMAT_MOD_INVALID >> 32;
-	display->modifier_lo = DRM_FORMAT_MOD_INVALID & 0xffffffff;
-
-	/*
-	 * Create a queue to communicate with the server.
-	 */
-	display->wl_queue = wl_display_create_queue(display->wl_display);
-	display->wl_registry = wl_display_get_registry(display->wl_display);
-	wl_proxy_set_queue((struct wl_proxy*)display->wl_registry,
-			   display->wl_queue);
-	wl_registry_add_listener(display->wl_registry, &wayland_registry_listener, display);
-
-	/* Now setup the DRM device */
-	if (!setup_drm_device(display)) {
-		err = WSEGL_BAD_NATIVE_DISPLAY;
-		goto fail;
-	}
-
-	/* Get the list of supported pixel formats */
-	if (!ensure_supported_dmabuf_formats(display)) {
-		err = WSEGL_BAD_NATIVE_DISPLAY;
-		goto fail;
-	}
-
-	/* XXX: should we wrap this with wl_kms client code? */
-	if (kms_create(display->fd, &display->kms)) {
-		err = WSEGL_BAD_NATIVE_DISPLAY;
-		goto fail;
-	}
-
 	/* Create a PVR context */
 	if (!(display->context = pvr_connect(ppsDevConnection))) {
 		err = WSEGL_CANNOT_INITIALISE;
 		goto fail;
 	}
 
-	/* set sync mode */
-	display->aggressive_sync = get_config_value(PVRCONF_ENABLE_AGGRESSIVE_SYNC, ENV_ENABLE_AGGRESSIVE_SYNC, 0);
+	/* Initialize PVR context access mutex */
+	pthread_mutex_init(&display->pvr_ctx_mutex, NULL);
 
 	/* return the pointers to the caps, configs, and the display handle */
 	*psCapabilities = WLWSEGL_Caps;
@@ -798,18 +751,6 @@ static WSEGLError WSEGLc_InitialiseDisplay(NativeDisplayType hNativeDisplay,
 	return WSEGL_SUCCESS;
 
 fail:
-	if (display->kms)
-		kms_destroy(&display->kms);
-	if (display->fd >= 0)
-		close(display->fd);
-	if (display->wl_kms)
-		wl_kms_destroy(display->wl_kms);
-	if (display->zlinux_dmabuf)
-		zwp_linux_dmabuf_v1_destroy(display->zlinux_dmabuf);
-	if (display->wl_registry)
-		wl_registry_destroy(display->wl_registry);
-	if (display->wl_queue)
-		wl_event_queue_destroy(display->wl_queue);
 	if (display->display_connected)
 		wl_display_disconnect(display->wl_display);
 	free(display);
@@ -829,18 +770,8 @@ static WSEGLError WSEGLc_CloseDisplay(WSEGLDisplayHandle hDisplay)
 	WLWSClientDisplay *display = (WLWSClientDisplay*)hDisplay;
 	WSEGL_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
 
+	pthread_mutex_destroy(&display->pvr_ctx_mutex);
 	pvr_disconnect(display->context);
-
-	wl_kms_destroy(display->wl_kms);
-	if (display->zlinux_dmabuf)
-		zwp_linux_dmabuf_v1_destroy(display->zlinux_dmabuf);
-	wl_registry_destroy(display->wl_registry);
-	wl_event_queue_destroy(display->wl_queue);
-
-	if (display->fd >= 0)
-		close(display->fd);
-
-	kms_destroy(&display->kms);
 
 	if (display->display_connected)
 		wl_display_disconnect(display->wl_display);
@@ -851,19 +782,23 @@ static WSEGLError WSEGLc_CloseDisplay(WSEGLDisplayHandle hDisplay)
 
 static void _kms_release_buffer(WLWSClientDrawable *drawable, struct kms_buffer *buffer)
 {
+	WLWSClientDisplay *display = drawable->display;
 	WSEGL_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
 
 	if (!buffer)
 		return;
 
-	if (buffer->map)
-		pvr_unmap_memory(drawable->display->context, buffer->map);
+	if (buffer->map){
+		pthread_mutex_lock(&display->pvr_ctx_mutex);
+		pvr_unmap_memory(display->context, buffer->map);
+		pthread_mutex_unlock(&display->pvr_ctx_mutex);
+	}
 
 	if (buffer->addr) {
 		if (buffer->flag & KMS_BUFFER_FLAG_TYPE_BO)
 			kms_bo_unmap(buffer->bo);
 		else
-			munmap(buffer->addr, drawable->info.size);
+			munmap(buffer->addr, buffer->info.size);
 	}
 	if (buffer->prime_fd)
 		close(buffer->prime_fd);
@@ -873,6 +808,7 @@ static void _kms_release_buffer(WLWSClientDrawable *drawable, struct kms_buffer 
 
 	if (buffer->wl_buffer)
 		wl_buffer_destroy(buffer->wl_buffer);
+	memset(buffer, 0, sizeof(struct kms_buffer));
 }
 
 static void _kms_release_buffers(WLWSClientDrawable *drawable)
@@ -887,7 +823,6 @@ static void _kms_release_buffers(WLWSClientDrawable *drawable)
 	for (i = 0; i < drawable->num_bufs; i++) {
 		WSEGL_DEBUG("%s: %s: %d: i=%d:\n", __FILE__, __func__, __LINE__, i);
 		_kms_release_buffer(drawable, &drawable->buffers[i]);
-		memset(&drawable->buffers[i], 0, sizeof(struct kms_buffer));
 	}
 	WSEGL_DEBUG("%s: %s: %d: done\n", __FILE__, __func__, __LINE__);
 }
@@ -907,11 +842,11 @@ static int _kms_get_number_of_buffers(void)
 	return num_buffers;
 }
 
-static int _kms_create_buffers(WLWSClientDrawable *drawable)
+static int _kms_create_buffer(WLWSClientDrawable *drawable, struct kms_buffer *buffer)
 {
-	WLWSClientDisplay *display = drawable->display;
-	int i, err;
+	int err;
 	uint32_t handle;
+	WLWSClientDisplay *display = drawable->display;
 	unsigned attr[] = {
 		KMS_BO_TYPE, KMS_BO_TYPE_SCANOUT_X8R8G8B8,
 		KMS_WIDTH, 0,
@@ -928,63 +863,58 @@ static int _kms_create_buffers(WLWSClientDrawable *drawable)
 	attr[3] = drawable->info.stride = ((drawable->info.width + 31) >> 5) << 5;
 	attr[5] = drawable->info.height;
 
-	// number of buffers
-	drawable->num_bufs = _kms_get_number_of_buffers();
+	if ((err = kms_bo_create(drawable->kms, attr, &buffer->bo)))
+		goto kms_error;
 
-	for (i = 0; i < drawable->num_bufs; i++) {
-		if ((err = kms_bo_create(display->kms, attr, &drawable->buffers[i].bo)))
-			goto kms_error;
+	kms_bo_get_prop(buffer->bo, KMS_HANDLE, &handle);
 
-		kms_bo_get_prop(drawable->buffers[i].bo, KMS_HANDLE, &handle);
-
-		if (drmPrimeHandleToFD(display->fd, handle, DRM_CLOEXEC,
-				       &drawable->buffers[i].prime_fd)) {
-			WSEGL_DEBUG(
-				"%s: %s: %d: drmPrimeHandleToFD failed. %s\n",
-				__FILE__, __func__, __LINE__, strerror(errno));
-			goto kms_error;
-		}
-
-		WSEGL_DEBUG("%s: %s: %d (prime_fd=%d)\n", __FILE__, __func__,
-			    __LINE__, drawable->buffers[i].prime_fd);
-
-		drawable->buffers[i].flag |= KMS_BUFFER_FLAG_TYPE_BO;
-
-		drawable->buffers[i].drawable = drawable;
+	if (drmPrimeHandleToFD(drawable->fd, handle, DRM_CLOEXEC,
+			       &buffer->prime_fd)) {
+		WSEGL_DEBUG(
+			"%s: %s: %d: drmPrimeHandleToFD failed. %s\n",
+			__FILE__, __func__, __LINE__, strerror(errno));
+		goto kms_error;
 	}
 
-	kms_bo_get_prop(drawable->buffers[0].bo, KMS_PITCH, (unsigned int*)&drawable->info.pitch);
+	WSEGL_DEBUG("%s: %s: %d (prime_fd=%d)\n", __FILE__, __func__,
+		    __LINE__, buffer->prime_fd);
+
+	buffer->flag |= KMS_BUFFER_FLAG_TYPE_BO;
+
+	buffer->drawable = drawable;
+
+	kms_bo_get_prop(buffer->bo, KMS_PITCH, (unsigned int*)&drawable->info.pitch);
 	drawable->info.size = drawable->info.pitch * drawable->info.height;
 
 	WSEGL_DEBUG("%s: %s: %d: size=%d, %dx%d, pitch=%d, stride=%d\n", __FILE__, __func__, __LINE__,
-			drawable->info.size, drawable->info.width, drawable->info.height, drawable->info.pitch, drawable->info.stride);
+		    drawable->info.size, drawable->info.width, drawable->info.height, drawable->info.pitch, drawable->info.stride);
 	/* Wrap KMS BO with PVR service */
-	for (i = 0; i < drawable->num_bufs; i++) {
-		if (!(drawable->buffers[i].map =
-		      pvr_map_dmabuf(display->context,
-				     drawable->buffers[i].prime_fd,
-				     CLIENT_PVR_MAP_NAME)))
-			goto kms_error;
+	pthread_mutex_lock(&display->pvr_ctx_mutex);
+	if (!(buffer->map =
+	      pvr_map_dmabuf(display->context,
+			     buffer->prime_fd,
+			     CLIENT_PVR_MAP_NAME))){
+		pthread_mutex_unlock(&display->pvr_ctx_mutex);
+		goto kms_error;
 	}
+	buffer->info = drawable->info;
+	pthread_mutex_unlock(&display->pvr_ctx_mutex);
 
 	return 0;
 
 kms_error:
 	WSEGL_DEBUG("%s: %s: %d: %s\n", __FILE__, __func__, __LINE__, strerror((err == -1) ? errno : err));
-	_kms_release_buffers(drawable);
+	_kms_release_buffer(drawable, buffer);
+
 	return -1;
 }
 
 static void _kms_resize_callback(struct wl_egl_window *window, void *private)
 {
-	WLWSClientDrawable *drawable = private;
+	WSEGL_UNREFERENCED_PARAMETER(private);
 	WSEGL_UNREFERENCED_PARAMETER(window);
 
 	WSEGL_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
-
-	if (drawable->info.width  != drawable->window->width ||
-	    drawable->info.height != drawable->window->height)
-		drawable->resized = 1;
 }
 
 /***********************************************************************************
@@ -1002,6 +932,9 @@ static WSEGLError WSEGLc_CreateWindowDrawable(WSEGLDisplayHandle hDisplay,
 					      WLWSEGL_COLOURSPACE_FORMAT eColorSpace,
 					      bool bIsProtected)
 {
+	int i = 0;
+	int j = 0; 
+	WSEGLError err = WSEGL_CANNOT_INITIALISE;
 	WLWSClientDisplay *display = (WLWSClientDisplay*)hDisplay;
 	WLWSClientDrawable *drawable;
 	WSEGL_UNREFERENCED_PARAMETER(eColorSpace);
@@ -1020,22 +953,82 @@ static WSEGLError WSEGLc_CreateWindowDrawable(WSEGLDisplayHandle hDisplay,
 	 */
 	drawable->info.ui32DrawableType = WSEGL_DRAWABLE_WINDOW;
 	drawable->window = (struct wl_egl_window*)hNativeWindow;
-	drawable->display = display;
 	drawable->buffer_type = WLWS_BUFFER_KMS_BO;
 	drawable->info.pixelformat = psConfig->ePixelFormat;
+	drawable->display = display;
+	drawable->fd = -1;
 
-	/* Create KMS BO for rendering. */
-	if (_kms_create_buffers(drawable))
-		goto kms_error;
+	/*
+	 * Initialize modifier
+	 */
+	drawable->modifier_hi = DRM_FORMAT_MOD_INVALID >> 32;
+	drawable->modifier_lo = DRM_FORMAT_MOD_INVALID & 0xffffffff;
+
+	/* Create drawable specific event queue to communicate with the server */
+	drawable->wl_queue = wl_display_create_queue(display->wl_display);
+	if (!drawable->wl_queue)
+		goto fail;
+
+	/*wrap wl_display proxy to add it to wl_queue in a thread-safe way */
+	drawable->wl_display_wrapper =
+		(struct wl_display*)wl_proxy_create_wrapper(display->wl_display);
+	if(drawable->wl_display_wrapper == NULL)
+		goto fail;
+
+	wl_proxy_set_queue((struct wl_proxy*)drawable->wl_display_wrapper, drawable->wl_queue);
+
+	drawable->wl_registry = wl_display_get_registry(drawable->wl_display_wrapper);
+	wl_registry_add_listener(drawable->wl_registry,
+				 &wayland_registry_listener,
+				 drawable);
+
+	/* Assign wl_surface proxy to drawable event queue */
+	drawable->wl_surface_wrapper =  wl_proxy_create_wrapper(drawable->window->surface);
+	if(!drawable->wl_surface_wrapper)
+		goto fail;
+
+	wl_proxy_set_queue((struct wl_proxy*)drawable->wl_surface_wrapper, drawable->wl_queue);
+
+	/* Now setup the DRM device */
+	if (!setup_drm_device(drawable)) {
+		err = WSEGL_BAD_NATIVE_DISPLAY;
+		goto fail;
+	}
+
+	/* Get the list of supported pixel formats */
+	if (!ensure_supported_dmabuf_formats(drawable)) {
+		err = WSEGL_BAD_NATIVE_DISPLAY;
+		goto fail;
+	}
+
+	/* XXX: should we wrap this with wl_kms client code? */
+	if (kms_create(drawable->fd, &drawable->kms)) {
+		err = WSEGL_BAD_NATIVE_DISPLAY;
+		goto fail;
+	}
+
+	/* number of buffers */
+	drawable->num_bufs = _kms_get_number_of_buffers();
+
+	for (i = 0; i < drawable->num_bufs; i++) {
+	    /* Create KMS BO for rendering. */
+	    if (_kms_create_buffer(drawable, &drawable->buffers[i]))
+		goto fail;
+	}
 
 	/* now set the current rendering buffer */
 	init_free_buffer_queue(drawable);
 	drawable->current = get_free_buffer(drawable);
+	if(drawable->current->flag == KMS_BUFFER_FLAG_ERROR)
+	    goto fail;
 
 	/* set swap interval, either default value or whatever previously set before resizing */
 	if (GET_EGL_WINDOW_PRIVATE(drawable->window)) {
 		WLWSClientDrawable *previous_drawable = GET_EGL_WINDOW_PRIVATE(drawable->window);
-		drawable->surface = previous_drawable->surface;
+		drawable->surface = calloc(sizeof(WLWSClientSurface), 1);
+		drawable->surface->interval =
+			((previous_drawable->surface) ? (previous_drawable->surface->interval) : 1);
+		drawable->surface->sync_obj = NULL;
 		previous_drawable->window = NULL;
 	} else {
 		drawable->surface = calloc(sizeof(WLWSClientSurface), 1);
@@ -1057,9 +1050,28 @@ static WSEGLError WSEGLc_CreateWindowDrawable(WSEGLDisplayHandle hDisplay,
 
 	return WSEGL_SUCCESS;
 
-kms_error:
+fail:
+	for(j=0;j<i;j++)
+    		_kms_release_buffer(drawable, &drawable->buffers[i]);
+	if (drawable->kms)
+		kms_destroy(&drawable->kms);
+	if (drawable->fd >= 0)
+		close(drawable->fd);
+	if (drawable->wl_kms)
+		wl_kms_destroy(drawable->wl_kms);
+	if (drawable->zlinux_dmabuf)
+		zwp_linux_dmabuf_v1_destroy(drawable->zlinux_dmabuf);
+	if (drawable->wl_registry)
+		wl_registry_destroy(drawable->wl_registry);
+	if(drawable->wl_queue)
+		wl_event_queue_destroy(drawable->wl_queue);
+	if(drawable->wl_surface_wrapper)
+		wl_proxy_wrapper_destroy(drawable->wl_surface_wrapper);
+	if(drawable->wl_display_wrapper)
+		wl_proxy_wrapper_destroy(drawable->wl_display_wrapper);
+
 	free(drawable);
-	return WSEGL_CANNOT_INITIALISE;
+	return err;
 }
 
 static void _kms_buffer_destroy_callback(struct wl_listener *listener,
@@ -1161,6 +1173,7 @@ static WLWSClientDrawable *import_wl_kms_buffer(WLWSClientDisplay *display, stru
 	wl_resource_add_destroy_listener(
 		buffer->resource, &drawable->kms_buffer_destroy_listener);
 	drawable->pixmap_kms_buffer_in_use = 1;
+	drawable->current->info = drawable->info;
 
 	return drawable;
 
@@ -1384,6 +1397,7 @@ static WLWSClientDrawable *import_native_rel_buffer(WLWSClientDisplay *display, 
 	drawable->info.stride = buffer->stride;
 	drawable->info.size   = (drawable->info.stride * drawable->info.height * bpp) >> 3;
 	drawable->current->addr = buffer->pixelData;
+	drawable->current->info = drawable->info;
 
 	WSEGL_DEBUG("%s: %s: %d: buffer = %p (%dx%d, stride(pitch in wsegl)=%d, size=%d, format=%08x)\n",
 			__FILE__, __func__, __LINE__, buffer, buffer->width, buffer->height, buffer->stride, drawable->info.size, buffer->format);
@@ -1442,13 +1456,19 @@ static WSEGLError WSEGLc_CreatePixmapDrawable(WSEGLDisplayHandle hDisplay,
 			goto error;
 	}
 
-	if (!(drawable->current->map = pvr_map_memory(display->context, drawable->current->addr, drawable->info.size)))
+	pthread_mutex_lock(&display->pvr_ctx_mutex);
+	if (!(drawable->current->map = pvr_map_memory(display->context, drawable->current->addr, drawable->current->info.size))){
+		pthread_mutex_unlock(&display->pvr_ctx_mutex);
 		goto error;
+	}
+	pthread_mutex_unlock(&display->pvr_ctx_mutex);
 
 	drawable->info.ui32DrawableType = WSEGL_DRAWABLE_PIXMAP;
 	drawable->ref_count = 1;
 
 	*phDrawable = (WSEGLDrawableHandle)drawable;
+	drawable->current->info = drawable->info;
+	
 	return WSEGL_SUCCESS;
 
 error:
@@ -1477,23 +1497,7 @@ static WSEGLError WSEGLc_DeleteDrawable(WSEGLDrawableHandle hDrawable)
 		return WSEGL_BAD_NATIVE_PIXMAP;
 
 	drawable->ref_count--;
-	if (drawable->ref_count > 0)
-		return WSEGL_SUCCESS;
-
-	/* reset resize callback */
-	if (drawable->window) {
-		drawable->window->resize_callback = NULL;
-		SET_EGL_WINDOW_PRIVATE(drawable->window, NULL);
-		if (drawable->surface->frame_sync)
-			wl_callback_destroy(drawable->surface->frame_sync);
-		free(drawable->surface);
-		if (drawable->display->callback) {
-			wl_callback_destroy(drawable->display->callback);
-			drawable->display->callback = NULL;
-		}
-	}
-
-	if (drawable->pixmap_kms_buffer_in_use)
+	if (drawable->ref_count > 0 || drawable->pixmap_kms_buffer_in_use)
 		return WSEGL_SUCCESS;
 
 	switch (drawable->buffer_type) {
@@ -1502,15 +1506,49 @@ static WSEGLError WSEGLc_DeleteDrawable(WSEGLDrawableHandle hDrawable)
 		break;
 
 	case WLWS_BUFFER_USER_MEMORY:
+		pthread_mutex_lock(&drawable->display->pvr_ctx_mutex);
 		pvr_unmap_memory(drawable->display->context, drawable->current->map);
+		pthread_mutex_unlock(&drawable->display->pvr_ctx_mutex);
 		break;
-
 	default:
 		WSEGL_DEBUG("unknown buffer type: %d\n", drawable->buffer_type);
 	}
 
+	/* reset resize callback */
+	if (drawable->window) {
+		drawable->window->resize_callback = NULL;
+		SET_EGL_WINDOW_PRIVATE(drawable->window, NULL);
+	}
+
+	if(drawable->surface) {
+		if (drawable->surface->sync_obj) {
+			struct wayland_cb_data *cb_data =
+			    wl_callback_get_user_data(drawable->surface->sync_obj);
+			wl_callback_destroy(drawable->surface->sync_obj);
+			free(cb_data);
+		}
+		free(drawable->surface);
+	}
+
+	if (drawable->kms)
+		kms_destroy(&drawable->kms);
+	if (drawable->fd >= 0)
+		close(drawable->fd);
+	if (drawable->wl_kms)
+		wl_kms_destroy(drawable->wl_kms);
+	if (drawable->zlinux_dmabuf)
+		zwp_linux_dmabuf_v1_destroy(drawable->zlinux_dmabuf);
+	if (drawable->wl_registry)
+		wl_registry_destroy(drawable->wl_registry);
+	if(drawable->wl_queue)
+		wl_event_queue_destroy(drawable->wl_queue);
+	if(drawable->wl_surface_wrapper)
+		wl_proxy_wrapper_destroy(drawable->wl_surface_wrapper);
+	if(drawable->wl_display_wrapper)
+		wl_proxy_wrapper_destroy(drawable->wl_display_wrapper);
+
 	free(drawable);
-	
+
 	return WSEGL_SUCCESS;
 }
 
@@ -1526,8 +1564,7 @@ static void wayland_surface_damage_buffer(struct wl_surface *surface, WLWSDrawab
 	}
 }
 
-static int wayland_commit_buffer(WLWSClientDisplay *display,
-				 WLWSClientDrawable *drawable,
+static int wayland_commit_buffer(WLWSClientDrawable *drawable,
 				 const EGLint *rects, EGLint num_rects)
 {
 	struct wl_buffer *buffer;
@@ -1536,16 +1573,16 @@ static int wayland_commit_buffer(WLWSClientDisplay *display,
 	int interval = drawable->surface->interval;
 
 	/* Sync with the server. */
-	if (drawable->surface->frame_sync) {
+	if (drawable->surface->sync_obj) {
 		WSEGL_DEBUG("%s: %s: sync frame.\n", __FILE__, __func__);
 
-		wl_display_dispatch_queue_pending(display->wl_display,
-						  display->wl_queue);
-		while (drawable->surface->frame_sync) {
+		wl_display_dispatch_queue_pending(drawable->display->wl_display,
+						  drawable->wl_queue);
+		while (drawable->surface->sync_obj) {
 			WSEGL_DEBUG("%s: %s: wait for sync (%p(@%p))\n",
-				    __FILE__, __func__, drawable->surface->frame_sync, &drawable->surface->frame_sync);
-			if (wl_display_dispatch_queue(display->wl_display,
-						      display->wl_queue) < 0)
+				    __FILE__, __func__, drawable->surface->sync_obj, &drawable->surface->sync_obj);
+			if (wl_display_dispatch_queue(drawable->display->wl_display,
+						      drawable->wl_queue) < 0)
 				break;
 		}
 	}
@@ -1556,7 +1593,7 @@ static int wayland_commit_buffer(WLWSClientDisplay *display,
 	 * The compositor always holds at least one buffer for display.
 	 * We create wl_buffer with the KMS BO handle.
 	 */
-	if (!(buffer = wayland_get_wl_buffer(display, kms_buffer))) {
+	if (!(buffer = wayland_get_wl_buffer(kms_buffer))) {
 		// we failed to get wl_buffer...Nothing we can do...
 		WSEGL_DEBUG("%s: %s: %d: Unrecoverable error.\n", __FILE__, __func__, __LINE__);
 		return -1;
@@ -1568,36 +1605,42 @@ static int wayland_commit_buffer(WLWSClientDisplay *display,
 	 * For SwapInterval.
 	 */
 	if (interval > 0)
-		wayland_set_callback(display, wl_surface_frame(window->surface),
-				     &drawable->surface->frame_sync, "wl_surface_frame()");
+		wayland_set_callback(drawable, wl_surface_frame(window->surface),
+				     &drawable->surface->sync_obj, "wl_surface_frame()");
 
 	WSEGL_DEBUG("%s: %s: attach wl_buffer.\n", __FILE__, __func__);
 	/*
 	 * After creating wl_buffer, we can now attach the wl_buffer
 	 * to the wl_surface and send it to the compositor.
 	 */
-	wl_surface_attach(window->surface, buffer, window->dx, window->dy);
+	wl_surface_attach(drawable->wl_surface_wrapper, buffer, window->dx, window->dy);
 
-	window->attached_width = drawable->info.width;
-	window->attached_height = drawable->info.height;
+	window->attached_width = kms_buffer->info.width;
+	window->attached_height = kms_buffer->info.height;
 	window->dx = window->dy = 0;
 
 	if (num_rects && drawable->enable_damage_buffer)
-		wayland_surface_damage_buffer(window->surface, &drawable->info,
+		wayland_surface_damage_buffer(drawable->wl_surface_wrapper, &kms_buffer->info,
 					      rects, num_rects);
 	else
-		wl_surface_damage(window->surface, 0, 0,
-				  drawable->info.width, drawable->info.height);
+		wl_surface_damage(drawable->wl_surface_wrapper, 0, 0,
+				  kms_buffer->info.width, kms_buffer->info.height);
 
-	wl_surface_commit(window->surface);
+	wl_surface_commit(drawable->wl_surface_wrapper);
 
 	WSEGL_DEBUG("%s: %s: commited surface.\n", __FILE__, __func__);
-	// just to throttle.
-	if (!drawable->surface->frame_sync)
-		wayland_set_callback(display, wl_display_sync(display->wl_display), NULL,
-				     "wl_display_sync(1)");
 
-	wl_display_flush(display->wl_display);
+	/* If we're not waiting for a frame callback then we'll at least throttle
+	* to a sync callback so that we always give a chance for the compositor to
+	* handle the commit and send a release event before checking for a free
+	* buffer */
+	if (!drawable->surface->sync_obj)
+		wayland_set_callback(drawable, 
+					wl_display_sync(drawable->display->wl_display), 
+					drawable->surface->sync_obj,
+				     	"wl_display_sync(1)");
+
+	wl_display_flush(drawable->display->wl_display);
 
 	return 0;
 }
@@ -1633,7 +1676,7 @@ static WSEGLError WSEGLc_SwapDrawableWithDamage(WSEGLDrawableHandle hDrawable, E
 	/* mark that the buffer is locked. */
 	drawable->current->flag |= KMS_BUFFER_FLAG_LOCKED;
 
-	if (wayland_commit_buffer(display, drawable, pasDamageRect, uiNumDamageRect))
+	if (wayland_commit_buffer(drawable, pasDamageRect, uiNumDamageRect))
 		return WSEGL_BAD_NATIVE_WINDOW;
 
 	/*
@@ -1845,24 +1888,18 @@ static WSEGLError WSEGLc_GetDrawableParameters(WSEGLDrawableHandle hDrawable,
 	WSEGL_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
 
 	/*
-	 * This will let IMG EGL to delete the drawable, and then recreate
-	 * the drawable from the native window, i.e. drawable->resized is reset
-	 * automatically.
-	 */
-	if (drawable->resized)
-		return WSEGL_BAD_DRAWABLE;
-
-	/*
 	 * We need to wait for buffer release if the drawable is a window.
 	 */
 	wayland_wait_for_buffer_release(drawable);
+	if(drawable->current->flag == KMS_BUFFER_FLAG_ERROR)
+    		return WSEGL_BAD_DRAWABLE;;
 
 	memset(psRenderParams, 0, sizeof(*psRenderParams));
-	pvr_get_params(drawable->current->map, &drawable->info, psRenderParams);
+	pvr_get_params(drawable->current->map, &drawable->current->info, psRenderParams);
 	psRenderParams->sBase.i32BufferAge = drawable->current->buffer_age;
 	if (drawable->source) {
 		memset(psSourceParams, 0, sizeof(*psSourceParams));
-		pvr_get_params(drawable->source->map, &drawable->info, psSourceParams);
+		pvr_get_params(drawable->source->map, &drawable->source->info, psSourceParams);
 		psSourceParams->sBase.i32BufferAge = drawable->source->buffer_age;
 	} else {
 		memcpy(psSourceParams, psRenderParams, sizeof(*psSourceParams));
@@ -1886,7 +1923,7 @@ static WSEGLError WSEGLc_GetImageParameters(WSEGLDrawableHandle hDrawable,
 	WSEGL_UNREFERENCED_PARAMETER(ulPlaneOffset);
 
 	memset(psImageParams, 0, sizeof(*psImageParams));
-	if (!pvr_get_image_params(drawable->current->map, &drawable->info, psImageParams)) {
+	if(!pvr_get_image_params(drawable->current->map, &drawable->current->info, psImageParams)) {
 		return WSEGL_BAD_NATIVE_PIXMAP;
 	}
 
