@@ -1857,6 +1857,9 @@ static WSEGLError WSEGLc_GetDrawableParameters(WSEGLDrawableHandle hDrawable,
 	 */
 	wayland_wait_for_buffer_release(drawable);
 
+	if (drawable->current == NULL)
+		return WSEGL_BAD_DRAWABLE;
+
 	memset(psRenderParams, 0, sizeof(*psRenderParams));
 	pvr_get_params(drawable->current->map, &drawable->info, psRenderParams);
 	psRenderParams->sBase.i32BufferAge = drawable->current->buffer_age;
