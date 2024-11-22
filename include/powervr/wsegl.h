@@ -2,7 +2,7 @@
 @File
 @Title          WSEGL interface definition
 @Copyright      Copyright (c) Imagination Technologies Ltd. All Rights Reserved
-		Copyright (c) 2021 Renesas Electronics Corporation. All rights reserved.
+				Copyright (c) 2022 Renesas Electronics Corporation. All rights reserved.
 @License        MIT
 
 The contents of this file are subject to the MIT license as set out below.
@@ -121,19 +121,20 @@ typedef enum
 	WSEGL_CAP_NATIVE_SYNC_SUPPORT = 6, /* System default value = 0 */
 	WSEGL_CAP_COLORSPACE = 7, /* System default value = 0 */
 	WSEGL_CAP_IMAGE_COLORSPACE = 8, /* System default value = 0 */
-
+	WSEGL_CAP_SURFACE_COMPRESSION_SUPPORT = 9 /* System default value = 0 (FALSE) */
 } WSEGLCapsType;
 
 #ifdef REL_STANDALONE_BUILD
 typedef struct YUV_INFO_TAG
 {
-	bool	bValid;
+	bool		bValid;
+	IMG_FB_COMPRESSION eFBCompression;
 	uint32_t	ui32Plane0StrideInTexels;
 	uint32_t	ui32Plane0StrideInBytes;
 	/* Address which hardware needs - will be either start of header section or data section depending on HW */
-	uint32_t	ui32HWPlaneAddressInBytes[3];
-	/* Size of header section */
-	uint32_t	ui32PlaneHeaderSizeInBytes[3];
+	uint32_t	aui32HWPlaneOffsetInBytes[3];
+	uint32_t	aui32PlaneDataSizeInBytes[3];
+	uint32_t	aui32PlaneHeaderSizeInBytes[3];
 } YUV_INFO;
 #endif
 
@@ -222,6 +223,9 @@ typedef struct
 	IMG_YUV_COLORSPACE   eYUVColorspace;
 
 	uint32_t             ui32AntiAliasMode;
+
+	/* Requested FBC mode - set through EGL_EXT_surface_compression */
+	IMG_FB_COMPRESSION   eFBCompression;
 } WSEGLConfig;
 
 /*

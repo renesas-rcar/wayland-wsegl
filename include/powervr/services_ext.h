@@ -29,7 +29,7 @@ THE SOFTWARE.
 #ifndef POWERVR_SERVICES_H
 #define POWERVR_SERVICES_H
 
-#if defined (__cplusplus)
+#if defined(__cplusplus)
 extern "C" {
 #endif
 
@@ -185,7 +185,7 @@ bool PVRSRVGetAppHintStringExt(void *pvHintState,
 bool PVRSRVCreateTransferContextExt(PVRSRV_DEVMEMCTX hDevMemContext,
 									void *hTransferContext);
 
-#if defined (__cplusplus)
+#if defined(__cplusplus)
 }
 #endif
 
