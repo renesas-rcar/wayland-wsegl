@@ -128,7 +128,6 @@ typedef enum
 typedef struct YUV_INFO_TAG
 {
 	bool		bValid;
-	IMG_FB_COMPRESSION eFBCompression;
 	uint32_t	ui32Plane0StrideInTexels;
 	uint32_t	ui32Plane0StrideInBytes;
 	/* Address which hardware needs - will be either start of header section or data section depending on HW */
@@ -222,8 +221,6 @@ typedef struct
 	/* YUV colorspace */
 	IMG_YUV_COLORSPACE   eYUVColorspace;
 
-	uint32_t             ui32AntiAliasMode;
-
 	/* Requested FBC mode - set through EGL_EXT_surface_compression */
 	IMG_FB_COMPRESSION   eFBCompression;
 } WSEGLConfig;
@@ -279,7 +276,6 @@ typedef struct
 
 	PVRSRV_MEMDESC           hMetaDataMemDesc;
 	IMG_DEVMEM_SIZE_T        uiMetaDataAllocSize;
-	uint32_t                 ui32OffsetFBCType;
 
 #if defined(GTRACE_TOOL)
 	/* Allocation ID */
@@ -297,9 +293,6 @@ typedef struct
 
 	/* FB compression mode */
 	IMG_FB_COMPRESSION       eFBCompression;
-
-	/* FBC Data offset */
-	int32_t 				ui32FBCDataOffset;
 
 	/* Dependency fence */
 	PVRSRV_FENCE             hFence;
@@ -352,6 +345,9 @@ typedef struct
 
 	/* If YUV */
 	YUV_INFO				sYUVInfo;
+
+	uint32_t              ui32CYUVMode;
+	IMG_DEV_VIRTADDR	  sDevHeaderVirtAddr;
 
 } WSEGLImageParams;
 
