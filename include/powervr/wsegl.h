@@ -221,6 +221,8 @@ typedef struct
 	/* YUV colorspace */
 	IMG_YUV_COLORSPACE   eYUVColorspace;
 
+	uint32_t             ui32AntiAliasMode;
+
 	/* Requested FBC mode - set through EGL_EXT_surface_compression */
 	IMG_FB_COMPRESSION   eFBCompression;
 } WSEGLConfig;
