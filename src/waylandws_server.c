@@ -441,7 +441,7 @@ static WSEGLError WSEGLs_CreatePixmapDrawable(WSEGLDisplayHandle hDisplay,
 		fd = buffer->fd;
 	} else if (buffer->handle) {
 		int kms_fd = wayland_kms_fd_get(buffer->kms);
-		if (drmPrimeHandleToFD(kms_fd, buffer->handle, DRM_CLOEXEC, &drawable->current->dmafd)) {
+		if (drmPrimeHandleToFD(kms_fd, buffer->handle, DRM_RDWR | DRM_CLOEXEC, &drawable->current->dmafd)) {
 			WSEGL_DEBUG("%s: %s: %d: drmPrimeHandleToFD failed\n", __FILE__, __func__, __LINE__);
 			goto error;
 		}

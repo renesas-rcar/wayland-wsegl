@@ -937,7 +937,7 @@ static int _kms_create_buffers(WLWSClientDrawable *drawable)
 
 		kms_bo_get_prop(drawable->buffers[i].bo, KMS_HANDLE, &handle);
 
-		if (drmPrimeHandleToFD(display->fd, handle, DRM_CLOEXEC,
+		if (drmPrimeHandleToFD(display->fd, handle, DRM_RDWR | DRM_CLOEXEC,
 				       &drawable->buffers[i].prime_fd)) {
 			WSEGL_DEBUG(
 				"%s: %s: %d: drmPrimeHandleToFD failed. %s\n",
