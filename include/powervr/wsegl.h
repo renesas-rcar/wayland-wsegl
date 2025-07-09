@@ -128,7 +128,6 @@ typedef enum
 typedef struct YUV_INFO_TAG
 {
 	bool		bValid;
-	IMG_FB_COMPRESSION eFBCompression;
 	uint32_t	ui32Plane0StrideInTexels;
 	uint32_t	ui32Plane0StrideInBytes;
 	/* Address which hardware needs - will be either start of header section or data section depending on HW */
